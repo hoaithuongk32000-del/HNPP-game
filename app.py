@@ -276,6 +276,127 @@ def render_text_with_links(text):
     return "".join(parts)
 
 
+def render_markdown(md_text):
+    """Convert markdown text to HTML (lightweight, no external deps)."""
+    lines = md_text.split("\n")
+    html_parts = []
+    in_code_block = False
+    in_list = None
+    list_ordered = False
+
+    def inline_format(text):
+        text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<strong><em>\1</em></strong>", text)
+        text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+        text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
+        text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", text)
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+        text = re.sub(
+            r"\[([^\]]+)\]\(([^)]+)\)",
+            r'<a href="\2" target="_blank">\1</a>',
+            text,
+        )
+        return text
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            if in_list:
+                html_parts.append(f"</{in_list}>")
+                in_list = None
+            if in_code_block:
+                html_parts.append("</code></pre>")
+                in_code_block = False
+            else:
+                in_code_block = True
+                html_parts.append("<pre><code>")
+            continue
+
+        if in_code_block:
+            html_parts.append(str(escape(line)))
+            html_parts.append("\n")
+            continue
+
+        if not stripped:
+            if in_list:
+                html_parts.append(f"</{in_list}>")
+                in_list = None
+            continue
+
+        if stripped.startswith("---") or stripped.startswith("***"):
+            if in_list:
+                html_parts.append(f"</{in_list}>")
+                in_list = None
+            html_parts.append("<hr>")
+            continue
+
+        if stripped.startswith("#"):
+            if in_list:
+                html_parts.append(f"</{in_list}>")
+                in_list = None
+            level = 0
+            for ch in stripped:
+                if ch == "#":
+                    level += 1
+                else:
+                    break
+            if level > 6:
+                level = 6
+            text = stripped[level:].strip()
+            html_parts.append(f"<h{level}>{inline_format(text)}</h{level}>")
+            continue
+
+        if stripped.startswith("> "):
+            if in_list:
+                html_parts.append(f"</{in_list}>")
+                in_list = None
+            html_parts.append(f"<blockquote><p>{inline_format(stripped[2:])}</p></blockquote>")
+            continue
+
+        li_match = re.match(r"^[-*+]\s+(.+)$", stripped)
+        if li_match:
+            if in_list != "ul":
+                if in_list:
+                    html_parts.append(f"</{in_list}>")
+                html_parts.append("<ul>")
+                in_list = "ul"
+            html_parts.append(f"<li>{inline_format(li_match.group(1))}</li>")
+            continue
+
+        ol_match = re.match(r"^\d+\.\s+(.+)$", stripped)
+        if ol_match:
+            if in_list != "ol":
+                if in_list:
+                    html_parts.append(f"</{in_list}>")
+                html_parts.append("<ol>")
+                in_list = "ol"
+            html_parts.append(f"<li>{inline_format(ol_match.group(1))}</li>")
+            continue
+
+        if in_list:
+            html_parts.append(f"</{in_list}>")
+            in_list = None
+
+        html_parts.append(f"<p>{inline_format(stripped)}</p>")
+
+    if in_list:
+        html_parts.append(f"</{in_list}>")
+    if in_code_block:
+        html_parts.append("</code></pre>")
+
+    return "\n".join(html_parts)
+
+
+def load_md_page(filename):
+    """Load a .md file from project dir and render to HTML."""
+    filepath = os.path.join(BASE_DIR, filename)
+    if not os.path.isfile(filepath):
+        return f"<p>File <code>{escape(filename)}</code> not found.</p>"
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    return render_markdown(content)
+
+
 def build_style_css(style):
     css = []
     if style.get("color"):
@@ -526,6 +647,31 @@ summary{cursor:pointer;font-weight:600;color:var(--primary)}
 .mod-link-preview:hover{border-color:var(--primary);box-shadow:var(--shadow)}
 .mod-link-title{font-size:1.1rem;font-weight:700;color:var(--primary);margin-bottom:6px}
 .mod-link-desc{font-size:.9rem;color:#666}
+.md-content h1{font-size:1.8rem;color:var(--primary);border-bottom:3px solid var(--primary);padding-bottom:10px;margin:24px 0 16px}
+.md-content h2{font-size:1.4rem;color:var(--primary-dark);margin:20px 0 12px}
+.md-content h3{font-size:1.15rem;color:#333;margin:16px 0 8px}
+.md-content p{margin:10px 0;line-height:1.8}
+.md-content ul,.md-content ol{margin:10px 0 10px 24px}
+.md-content li{margin:6px 0;line-height:1.7}
+.md-content a{color:#1976d2;text-decoration:underline}
+.md-content strong{font-weight:700}
+.md-content em{font-style:italic}
+.md-content blockquote{border-left:4px solid var(--primary);padding:12px 20px;margin:16px 0;background:#fff8e1;border-radius:0 8px 8px 0}
+.md-content code{background:#f5f5f5;padding:2px 6px;border-radius:4px;font-family:monospace;font-size:.9em}
+.md-content pre{background:#263238;color:#eee;padding:16px;border-radius:8px;overflow-x:auto;margin:16px 0}
+.md-content pre code{background:none;color:inherit;padding:0}
+.md-content hr{border:none;border-top:2px solid var(--border);margin:24px 0}
+.law-card{background:#fff;border-radius:12px;padding:28px;margin:20px 0;box-shadow:var(--shadow);border-left:5px solid var(--primary);transition:transform .2s,box-shadow .2s}
+.law-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.12)}
+.law-card h3{margin:0 0 10px;color:var(--primary)}
+.law-card h3 a{color:var(--primary);text-decoration:none}
+.law-card h3 a:hover{text-decoration:underline}
+.law-card p{color:#555;margin:6px 0;line-height:1.6}
+.law-card ul{margin:10px 0 0 20px}
+.law-card ul li{margin:4px 0;color:#444}
+.gdocs-import{background:#e3f2fd;border:2px dashed #1976d2;border-radius:10px;padding:20px;margin:16px 0;text-align:center}
+.gdocs-import input{width:70%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:.95rem}
+.gdocs-import button{margin-left:8px;padding:10px 20px}
 @media(max-width:768px){
 .header-inner{height:56px}
 nav{display:none;flex-direction:column;position:absolute;top:56px;left:0;right:0;background:var(--primary-dark);padding:12px 0;box-shadow:0 4px 12px rgba(0,0,0,.2)}
@@ -1087,6 +1233,45 @@ function initModules(data) {
     try { modules = JSON.parse(data); } catch(e) { modules = []; }
     renderModules();
 }
+
+function importGDocs() {
+    let url = document.getElementById('gdocsUrl').value.trim();
+    let status = document.getElementById('gdocsStatus');
+    let btn = document.getElementById('gdocsBtn');
+    if(!url) { status.textContent = 'Vui long nhap link Google Docs'; return; }
+    if(!url.includes('docs.google.com/document')) { status.textContent = 'URL khong phai Google Docs'; return; }
+    btn.disabled = true;
+    status.textContent = 'Dang import...';
+    fetch('/api/import-gdocs?url=' + encodeURIComponent(url))
+    .then(r => r.json())
+    .then(data => {
+        btn.disabled = false;
+        if(data.error) { status.textContent = 'Loi: ' + data.error; return; }
+        // Fill title if empty
+        let titleInput = document.querySelector('input[name="title"]');
+        if(titleInput && !titleInput.value && data.title) titleInput.value = data.title;
+        // Add modules from imported data
+        if(data.modules && data.modules.length > 0) {
+            data.modules.forEach(m => {
+                let mod = {
+                    id: uid(), type: m.type, content: m.content || '',
+                    images: m.images || [],
+                    link: {url:'', title:'', description:''},
+                    style: m.style || {color:'#000000', bold:false, italic:false, strikethrough:false, underline:false}
+                };
+                modules.push(mod);
+            });
+            renderModules();
+        }
+        status.textContent = 'Import thanh cong! ' + (data.modules ? data.modules.length : 0) + ' muc da duoc them.';
+        status.style.color = '#2e7d32';
+    })
+    .catch(err => {
+        btn.disabled = false;
+        status.textContent = 'Loi ket noi: ' + err.message;
+        status.style.color = '#c62828';
+    });
+}
 </script>
 """
 
@@ -1155,6 +1340,15 @@ def creator():
                 <div class="desc-counter" id="desc_counter">0/500</div>
             </div>
             <div class="form-group"><label>Mục</label><select name="category">{cats}</select></div>
+
+            <div class="gdocs-import">
+                <div style="font-weight:600;margin-bottom:8px">&#128196; Import tu Google Docs</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+                    <input type="text" id="gdocsUrl" placeholder="Dan link Google Docs tai day..." style="flex:1;min-width:200px">
+                    <button type="button" class="btn" onclick="importGDocs()" id="gdocsBtn">Import</button>
+                </div>
+                <div id="gdocsStatus" style="margin-top:8px;font-size:.85rem;color:#666"></div>
+            </div>
 
             <div class="section-title" style="font-size:1rem;margin-top:24px">Nội dung bài đăng</div>
             <div class="builder-toolbar">
@@ -1262,6 +1456,15 @@ def edit_post(post_id):
             </div>
             <div class="form-group"><label>Mục</label><select name="category">{cats}</select></div>
 
+            <div class="gdocs-import">
+                <div style="font-weight:600;margin-bottom:8px">&#128196; Import tu Google Docs</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+                    <input type="text" id="gdocsUrl" placeholder="Dan link Google Docs tai day..." style="flex:1;min-width:200px">
+                    <button type="button" class="btn" onclick="importGDocs()" id="gdocsBtn">Import</button>
+                </div>
+                <div id="gdocsStatus" style="margin-top:8px;font-size:.85rem;color:#666"></div>
+            </div>
+
             <div class="section-title" style="font-size:1rem;margin-top:24px">Nội dung bài đăng</div>
             <div class="builder-toolbar">
                 <button type="button" class="btn-add" onclick="openAddModal()">&#43; Add</button>
@@ -1361,6 +1564,102 @@ def link_preview():
         return jsonify({"title": title, "description": desc, "url": url})
     except Exception:
         return jsonify({"title": url, "description": "", "url": url})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# API - Google Docs Import
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/import-gdocs")
+@login_required
+def import_gdocs():
+    url = request.args.get("url", "")
+    if not url:
+        return jsonify({"error": "Thiếu URL"}), 400
+
+    doc_match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", url)
+    if not doc_match:
+        return jsonify({"error": "URL không phải Google Docs"}), 400
+
+    doc_id = doc_match.group(1)
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=html"
+
+    try:
+        req = Request(export_url, headers={"User-Agent": "Mozilla/5.0 HNPP Bot"})
+        with urlopen(req, timeout=15) as resp:
+            raw_html = resp.read().decode("utf-8", errors="ignore")
+    except Exception as exc:
+        return jsonify({"error": f"Không thể tải tài liệu: {exc}"}), 400
+
+    title = ""
+    tm = re.search(r"<title[^>]*>([^<]+)</title>", raw_html, re.I)
+    if tm:
+        title = tm.group(1).strip()
+
+    # Extract images from the exported HTML and download them
+    images = []
+    img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.I)
+    for img_m in img_pattern.finditer(raw_html):
+        img_url = img_m.group(1)
+        if img_url.startswith("data:"):
+            continue
+        try:
+            img_req = Request(img_url, headers={"User-Agent": "Mozilla/5.0 HNPP Bot"})
+            with urlopen(img_req, timeout=10) as img_resp:
+                ct = img_resp.headers.get("Content-Type", "")
+                if "png" in ct:
+                    ext = "png"
+                elif "webp" in ct:
+                    ext = "webp"
+                else:
+                    ext = "jpg"
+                img_data = img_resp.read()
+                fname = f"{uuid.uuid4().hex}.{ext}"
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+                fpath = os.path.join(UPLOAD_DIR, fname)
+                with open(fpath, "wb") as imgf:
+                    imgf.write(img_data)
+                images.append(f"Hinhanh/baidang/{fname}")
+        except Exception:
+            continue
+
+    # Extract body text content from the exported HTML
+    body_html = raw_html
+    body_match = re.search(r"<body[^>]*>(.*?)</body>", body_html, re.S | re.I)
+    if body_match:
+        body_html = body_match.group(1)
+
+    # Remove style tags and attributes, scripts
+    body_html = re.sub(r"<style[^>]*>.*?</style>", "", body_html, flags=re.S | re.I)
+    body_html = re.sub(r"<script[^>]*>.*?</script>", "", body_html, flags=re.S | re.I)
+
+    # Strip Google's inline styles but keep structure
+    body_html = re.sub(r'\s+style="[^"]*"', "", body_html)
+    body_html = re.sub(r'\s+class="[^"]*"', "", body_html)
+    body_html = re.sub(r'\s+id="[^"]*"', "", body_html)
+
+    # Convert to plain text with line breaks
+    text = body_html
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</p>", "\n\n", text, flags=re.I)
+    text = re.sub(r"</h[1-6]>", "\n\n", text, flags=re.I)
+    text = re.sub(r"</li>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    # Build modules from extracted content
+    modules = []
+    if text:
+        modules.append({"type": "text", "content": text, "style": {}})
+    for img_path in images:
+        modules.append({"type": "image", "images": [img_path], "style": {}})
+
+    return jsonify({
+        "title": title,
+        "content": text,
+        "images": images,
+        "modules": modules,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1514,26 +1813,10 @@ def password_page():
 
 @app.route("/tos")
 def tos():
-    body = """<main>
-    <div class="page-content" style="max-width:860px;margin:24px auto">
-        <h1>Điều khoản sử dụng</h1>
-        <h2>1. Giới thiệu</h2>
-        <p>Chào mừng bạn đến với Cổng thông tin HNPP - Hanoi Academy People's Police. Bằng việc truy cập và sử dụng website này, bạn đồng ý tuân thủ các điều khoản và điều kiện sau đây.</p>
-        <h2>2. Quyền và nghĩa vụ của người dùng</h2>
-        <ul>
-            <li>Người dùng phải cung cấp thông tin chính xác khi đăng ký tài khoản.</li>
-            <li>Không sử dụng website cho mục đích bất hợp pháp.</li>
-            <li>Không chia sẻ tài khoản với người khác.</li>
-            <li>Tuân thủ mọi quy định và luật lệ của HNPP.</li>
-        </ul>
-        <h2>3. Quyền sở hữu trí tuệ</h2>
-        <p>Tất cả nội dung trên website bao gồm văn bản, hình ảnh, logo, thiết kế đều thuộc quyền sở hữu của HNPP. Nghiêm cấm sao chép, phân phối mà không có sự cho phép bằng văn bản.</p>
-        <h2>4. Giới hạn trách nhiệm</h2>
-        <p>HNPP không chịu trách nhiệm cho bất kỳ thiệt hại trực tiếp hoặc gián tiếp nào phát sinh từ việc sử dụng hoặc không thể sử dụng dịch vụ.</p>
-        <h2>5. Thay đổi điều khoản</h2>
-        <p>HNPP có quyền thay đổi các điều khoản này bất kỳ lúc nào. Các thay đổi sẽ có hiệu lực ngay khi được đăng trên website.</p>
-        <h2>6. Liên hệ</h2>
-        <p>Nếu bạn có bất kỳ câu hỏi nào về Điều khoản sử dụng, vui lòng liên hệ qua trang <a href="{{URL_SUPPORT}}">Hỗ trợ</a>.</p>
+    md_html = load_md_page("tos.md")
+    body = f"""<main>
+    <div class="page-content md-content" style="max-width:860px;margin:24px auto">
+        {md_html}
     </div></main>"""
     return render_page("Điều khoản sử dụng", body)
 
@@ -1544,25 +1827,10 @@ def tos():
 
 @app.route("/chinh-sach")
 def chinh_sach():
-    body = """<main>
-    <div class="page-content" style="max-width:860px;margin:24px auto">
-        <h1>Chính sách bảo mật</h1>
-        <h2>1. Thu thập thông tin</h2>
-        <p>Chúng tôi thu thập thông tin cá nhân khi bạn đăng ký tài khoản, bao gồm: tên đăng nhập, tên hiển thị. Chúng tôi cam kết bảo vệ thông tin của bạn.</p>
-        <h2>2. Sử dụng thông tin</h2>
-        <ul>
-            <li>Xác thực và quản lý tài khoản người dùng.</li>
-            <li>Cải thiện chất lượng dịch vụ.</li>
-            <li>Gửi thông báo quan trọng liên quan đến hệ thống.</li>
-        </ul>
-        <h2>3. Bảo mật thông tin</h2>
-        <p>Chúng tôi áp dụng các biện pháp bảo mật hợp lý để bảo vệ thông tin cá nhân của bạn khỏi truy cập trái phép, sử dụng sai mục đích hoặc tiết lộ. Mật khẩu được mã hóa một chiều, không thể giải mã ngược.</p>
-        <h2>4. Chia sẻ thông tin</h2>
-        <p>Chúng tôi không chia sẻ thông tin cá nhân của bạn với bên thứ ba, trừ khi được yêu cầu bởi pháp luật hoặc được sự đồng ý của bạn.</p>
-        <h2>5. Cookie</h2>
-        <p>Website sử dụng cookie phiên (session) để duy trì trạng thái đăng nhập. Bạn có thể tắt cookie trong trình duyệt nhưng điều này có thể ảnh hưởng đến trải nghiệm sử dụng.</p>
-        <h2>6. Cập nhật chính sách</h2>
-        <p>Chính sách bảo mật có thể được cập nhật theo thời gian. Mọi thay đổi sẽ được thông báo trên website.</p>
+    md_html = load_md_page("chinh-sach.md")
+    body = f"""<main>
+    <div class="page-content md-content" style="max-width:860px;margin:24px auto">
+        {md_html}
     </div></main>"""
     return render_page("Chính sách bảo mật", body)
 
@@ -1608,52 +1876,26 @@ def luat_hnpp():
     </div>
     <main>
     <div class="page-content" style="max-width:860px;margin:24px auto">
-        <h2>CHƯƠNG I: QUY ĐỊNH CHUNG</h2>
-        <h3>Điều 1. Phạm vi điều chỉnh</h3>
-        <p>Luật này quy định về tổ chức, hoạt động, quyền hạn và trách nhiệm của các thành viên trong hệ thống HNPP - Hanoi Academy People's Police.</p>
-        <h3>Điều 2. Đối tượng áp dụng</h3>
-        <p>Luật áp dụng cho tất cả thành viên, quản trị viên và người dùng tham gia vào hệ thống HNPP.</p>
-        <h3>Điều 3. Nguyên tắc hoạt động</h3>
-        <ol>
-            <li>Tuân thủ pháp luật Việt Nam và quy định nội bộ của HNPP.</li>
-            <li>Hoạt động minh bạch, công bằng và dân chủ.</li>
-            <li>Tôn trọng quyền và lợi ích hợp pháp của mọi thành viên.</li>
-            <li>Bảo vệ thông tin cá nhân và dữ liệu của hệ thống.</li>
-        </ol>
-        <h2>CHƯƠNG II: QUYỀN VÀ NGHĨA VỤ</h2>
-        <h3>Điều 4. Quyền của thành viên</h3>
-        <ol>
-            <li>Được truy cập và sử dụng các tính năng của hệ thống theo quyền hạn được cấp.</li>
-            <li>Được bảo vệ thông tin cá nhân theo Chính sách bảo mật.</li>
-            <li>Được đóng góp ý kiến, phản hồi để cải thiện hệ thống.</li>
-            <li>Được tham gia các hoạt động, sự kiện do HNPP tổ chức.</li>
-        </ol>
-        <h3>Điều 5. Nghĩa vụ của thành viên</h3>
-        <ol>
-            <li>Tuân thủ Điều khoản sử dụng và các quy định của HNPP.</li>
-            <li>Không gây rối, phá hoại hoặc làm ảnh hưởng đến hoạt động bình thường của hệ thống.</li>
-            <li>Không tuyên truyền, phát tán thông tin sai lệch hoặc gây hại.</li>
-            <li>Bảo mật tài khoản cá nhân, không chia sẻ thông tin đăng nhập.</li>
-        </ol>
-        <h2>CHƯƠNG III: XỬ LÝ VI PHẠM</h2>
-        <h3>Điều 6. Các hành vi vi phạm</h3>
-        <ol>
-            <li>Vi phạm Điều khoản sử dụng hoặc Chính sách bảo mật.</li>
-            <li>Gây rối, spam, quấy rối thành viên khác.</li>
-            <li>Sử dụng phần mềm, công cụ gây hại cho hệ thống.</li>
-            <li>Giả mạo thông tin hoặc danh tính.</li>
-        </ol>
-        <h3>Điều 7. Hình thức xử lý</h3>
-        <ol>
-            <li><strong>Cảnh cáo:</strong> Áp dụng cho lần vi phạm đầu tiên với mức độ nhẹ.</li>
-            <li><strong>Tạm khóa tài khoản:</strong> Từ 1-30 ngày tùy mức độ vi phạm.</li>
-            <li><strong>Khóa vĩnh viễn:</strong> Áp dụng cho vi phạm nghiêm trọng hoặc tái phạm nhiều lần.</li>
-        </ol>
-        <h2>CHƯƠNG IV: ĐIỀU KHOẢN THI HÀNH</h2>
-        <h3>Điều 8. Hiệu lực</h3>
-        <p>Luật này có hiệu lực kể từ ngày ban hành. Mọi thay đổi sẽ được thông báo trên website chính thức.</p>
-        <h3>Điều 9. Sửa đổi, bổ sung</h3>
-        <p>Ban quản trị HNPP có quyền sửa đổi, bổ sung Luật này khi cần thiết. Các phiên bản cập nhật sẽ được đăng tải công khai.</p>
+
+        <div class="law-card">
+            <h3><a href="https://docs.google.com/document/d/1-4_6TcYAtehDPRK0mL7WKg0S0BhdsAQ-im5eoQ9lX84/edit?usp=sharing" target="_blank">01/QĐ-BCA//2026</a></h3>
+            <p><strong>Sổ tay Luật CB/CS-HNPP</strong></p>
+        </div>
+
+        <div class="law-card" style="border-left-color:var(--accent)">
+            <h3><a href="https://docs.google.com/document/d/1FPReB9ZkNDh1sR8e3eOcGGc_dVU0lDIUXUYg4XIO_h0/edit?usp=sharing" target="_blank">SỔ TAY</a></h3>
+            <p><strong><em>ĐỂ TRÁNH TÌNH TRẠNG ABUSE MOD VÀ LẠM DỤNG</em></strong></p>
+            <ul>
+                <li>Bổ Sung Luật sử dụng và list commands</li>
+                <li>Đọc kĩ - Nắm rõ!</li>
+            </ul>
+        </div>
+
+        <div class="law-card" style="border-left-color:#1565c0">
+            <h3><a href="https://docs.google.com/document/d/1xTTf9a49WG_OHXXauZkz9raT_n39KddmozfAwW5JNZE/edit?usp=sharing" target="_blank">List Commands</a></h3>
+            <p>Danh sách các lệnh và quy định sử dụng trong HNPP.</p>
+        </div>
+
     </div></main>"""
     return render_page("Luật HNPP", body)
 
@@ -1746,54 +1988,7 @@ def admin_panel():
 
 @app.route("/group-game")
 def group_game():
-    db = get_baidang_db()
-    game_posts = db.execute(
-        "SELECT * FROM posts WHERE is_published=1 AND category='Group Game' ORDER BY created_at DESC"
-    ).fetchall()
-
-    post_cards = ""
-    if game_posts:
-        for p in game_posts:
-            snippet = str(escape(p["content"][:150])) + ("..." if len(p["content"]) > 150 else "")
-            post_cards += f"""<div class="card">
-                <h3><a href="{url_for('view_post', slug=p['slug'])}">{escape(p['title'])}</a></h3>
-                <p>{snippet}</p>
-                <div class="meta">{p['created_at'][:16]}</div>
-            </div>"""
-    else:
-        post_cards = '<p style="color:#888">Chưa có bài viết nào trong mục Group Game.</p>'
-
-    body = f"""
-    <div class="banner" style="padding:32px 16px 28px">
-        <h1>&#127918; Group Game</h1>
-        <p>Cộng đồng game và giải trí của HNPP</p>
-    </div>
-    <main>
-    <div class="page-content" style="max-width:960px;margin:24px auto">
-        <h2>Chào mừng đến với Group Game HNPP!</h2>
-        <p>Đây là không gian giải trí dành cho các thành viên của Hanoi Academy People's Police. Cùng nhau chơi game, kết nối và xây dựng cộng đồng!</p>
-        <div class="card-grid" style="margin-top:24px">
-            <div class="card" style="text-align:center;border-left-color:var(--accent)"><div style="font-size:3rem">&#9876;</div><h3>Roleplay</h3><p>Tham gia các sự kiện roleplay hấp dẫn cùng cộng đồng HNPP.</p></div>
-            <div class="card" style="text-align:center;border-left-color:#1565c0"><div style="font-size:3rem">&#127942;</div><h3>Giải đấu</h3><p>Các giải đấu game theo mùa với phần thưởng hấp dẫn.</p></div>
-            <div class="card" style="text-align:center;border-left-color:#2e7d32"><div style="font-size:3rem">&#129309;</div><h3>Kết nối</h3><p>Gặp gỡ và kết bạn với các thành viên khác trong cộng đồng.</p></div>
-            <div class="card" style="text-align:center;border-left-color:#e65100"><div style="font-size:3rem">&#128302;</div><h3>Mini Game</h3><p>Các trò chơi nhỏ giải trí trong lúc nghỉ ngơi.</p></div>
-        </div>
-        <div style="margin-top:32px">
-            <div class="section-title">Quy định Group Game</div>
-            <ol style="margin-left:20px">
-                <li>Tôn trọng lẫn nhau, không gây gổ hoặc xúc phạm.</li>
-                <li>Không sử dụng hack, cheat hoặc bất kỳ phần mềm gian lận nào.</li>
-                <li>Tuân thủ quy định của từng game và sự kiện.</li>
-                <li>Báo cáo vi phạm cho Admin thông qua trang <a href="{{{{URL_SUPPORT}}}}">Hỗ trợ</a>.</li>
-                <li>Có tinh thần thể thao, fair play trong mọi hoạt động.</li>
-            </ol>
-        </div>
-        <div style="margin-top:32px">
-            <div class="section-title">Bài viết về Game</div>
-            <div class="card-grid" style="grid-template-columns:1fr">{post_cards}</div>
-        </div>
-    </div></main>"""
-    return render_page("Group Game", body)
+    return redirect("https://www.roblox.com/vi/communities/33474786/HNPP-Hanoi-Capital-Peoples-Police")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
