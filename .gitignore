@@ -39,3 +39,7 @@ next-env.d.ts
 __pycache__/
 *.pyc
 hnpp.db
+account.db
+baidang.db
+main.db
+Hinhanh/

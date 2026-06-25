@@ -3,89 +3,220 @@
 HNPP - Hanoi Academy People's Police Website
 All-in-one single Python file (Flask + SQLite)
 Responsive for PC and Mobile
+Features: Content builder, Image upload, Markdown links, Multi-DB, Role hierarchy, Password encryption
 """
 
 import os
-import hashlib
+import json
+import uuid
 import secrets
 import sqlite3
 import re
+import base64
+import hashlib
 from datetime import datetime, timezone
 from functools import wraps
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 from flask import (
-    Flask, render_template_string, request, redirect,
-    url_for, session, flash, g, abort
+    Flask, request, redirect,
+    url_for, session, flash, g, abort, jsonify, send_from_directory
 )
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+from markupsafe import escape
+from flask import get_flashed_messages as _flask_gfm
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
-DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hnpp.db")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_ACCOUNT = os.path.join(BASE_DIR, "account.db")
+DB_BAIDANG = os.path.join(BASE_DIR, "baidang.db")
+DB_MAIN = os.path.join(BASE_DIR, "main.db")
+
+UPLOAD_DIR = os.path.join(BASE_DIR, "Hinhanh", "baidang")
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 
 MOD_KEY = "PUNKX--MEUG-4KK8-Q0SJ-FHXK"
+MOD_PASS = "HNPP_AD-NO-PASS[18]ok"
 MOD_PASS_PARAM = "hhoaihuongvntr"
+
+PASSWORD_PAGE_KEY = "mu6jAG5ZxVP$72G"
+PASSWORD_PAGE_PASS = "hoaithuong"
+
+LOGO_URL = "https://inviva.vn/wp-content/uploads/2026/04/logo-cong-an-vector-03.png"
+
+CATEGORIES = ["Tin tức", "Developer", "Quyết định", "Nghị định", "Sự kiện", "Luật"]
+
+ROLE_LEVELS = {
+    "creators": 1,
+    "trial_moderator": 2,
+    "moderator": 3,
+    "trial_admin": 4,
+    "admin": 5,
+    "headadmin": 6,
+}
+
+ROLE_LABELS = {
+    "creators": "Creators",
+    "trial_moderator": "Trial Moderator",
+    "moderator": "Moderator",
+    "trial_admin": "Trial Admin",
+    "admin": "Admin",
+    "headadmin": "Headadmin",
+}
+
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+
+# ── Persistent secret keys ──────────────────────────────────────────────────
+
+
+def _ensure_main_db():
+    db = sqlite3.connect(DB_MAIN)
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    db.commit()
+    return db
+
+
+def get_persistent_secret(name):
+    db = _ensure_main_db()
+    row = db.execute("SELECT value FROM settings WHERE key=?", (name,)).fetchone()
+    if row:
+        val = row[0]
+    else:
+        val = secrets.token_hex(32)
+        db.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (name, val))
+        db.commit()
+    db.close()
+    return val
+
+
+app.secret_key = os.environ.get("SECRET_KEY") or get_persistent_secret("app_secret")
+ENC_KEY = get_persistent_secret("enc_key")
+
+# ── Encryption helpers (reversible, for /password/ page) ─────────────────────
+
+
+def encrypt_password(plaintext):
+    salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac("sha256", ENC_KEY.encode(), salt, 100000)
+    data = plaintext.encode("utf-8")
+    ext_key = (key * (len(data) // len(key) + 1))[: len(data)]
+    encrypted = bytes(a ^ b for a, b in zip(data, ext_key))
+    return base64.urlsafe_b64encode(salt + encrypted).decode("ascii")
+
+
+def decrypt_password(ciphertext):
+    raw = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
+    salt, encrypted = raw[:16], raw[16:]
+    key = hashlib.pbkdf2_hmac("sha256", ENC_KEY.encode(), salt, 100000)
+    ext_key = (key * (len(encrypted) // len(key) + 1))[: len(encrypted)]
+    return bytes(a ^ b for a, b in zip(encrypted, ext_key)).decode("utf-8")
+
 
 # ── Database ────────────────────────────────────────────────────────────────
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+
+def get_account_db():
+    if "_db_acc" not in g:
+        g._db_acc = sqlite3.connect(DB_ACCOUNT)
+        g._db_acc.row_factory = sqlite3.Row
+    return g._db_acc
+
+
+def get_baidang_db():
+    if "_db_bd" not in g:
+        g._db_bd = sqlite3.connect(DB_BAIDANG)
+        g._db_bd.row_factory = sqlite3.Row
+    return g._db_bd
+
+
+def get_main_db():
+    if "_db_main" not in g:
+        g._db_main = sqlite3.connect(DB_MAIN)
+        g._db_main.row_factory = sqlite3.Row
+    return g._db_main
+
 
 @app.teardown_appcontext
-def close_db(exc):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+def close_dbs(exc):
+    for key in ("_db_acc", "_db_bd", "_db_main"):
+        db = g.pop(key, None)
+        if db:
+            db.close()
+
 
 def init_db():
-    db = sqlite3.connect(DATABASE)
-    db.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    db = sqlite3.connect(DB_ACCOUNT)
+    db.execute("""CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
+        password_enc TEXT NOT NULL,
         display_name TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'user',
+        role TEXT NOT NULL DEFAULT 'creators',
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS posts (
+    )""")
+    db.commit()
+    db.close()
+
+    db = sqlite3.connect(DB_BAIDANG)
+    db.execute("""CREATE TABLE IF NOT EXISTS posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
         slug TEXT UNIQUE NOT NULL,
-        content TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        content_modules TEXT NOT NULL DEFAULT '[]',
         category TEXT NOT NULL DEFAULT 'Tin tức',
         author_id INTEGER NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-        is_published INTEGER NOT NULL DEFAULT 1,
-        FOREIGN KEY (author_id) REFERENCES users(id)
-    );
-    """)
+        is_published INTEGER NOT NULL DEFAULT 1
+    )""")
     db.commit()
     db.close()
 
-def hash_password(pw):
-    return hashlib.sha256(pw.encode()).hexdigest()
+    _ensure_main_db()
+
 
 def slugify(text):
     t = text.lower().strip()
     for src, dst in [
-        (r"[àáạảãâầấậẩẫăằắặẳẵ]", "a"), (r"[èéẹẻẽêềếệểễ]", "e"),
-        (r"[ìíịỉĩ]", "i"), (r"[òóọỏõôồốộổỗơờớợởỡ]", "o"),
-        (r"[ùúụủũưừứựửữ]", "u"), (r"[ỳýỵỷỹ]", "y"), (r"[đ]", "d"),
+        (r"[àáạảãâầấậẩẫăằắặẳẵ]", "a"),
+        (r"[èéẹẻẽêềếệểễ]", "e"),
+        (r"[ìíịỉĩ]", "i"),
+        (r"[òóọỏõôồốộổỗơờớợởỡ]", "o"),
+        (r"[ùúụủũưừứựửữ]", "u"),
+        (r"[ỳýỵỷỹ]", "y"),
+        (r"[đ]", "d"),
     ]:
         t = re.sub(src, dst, t)
     return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
 
-# ── Auth helpers ────────────────────────────────────────────────────────────
+
+# ── Auth helpers ─────────────────────────────────────────────────────────────
+
 
 def get_current_user():
     if "user_id" in session:
-        db = get_db()
-        return db.execute("SELECT * FROM users WHERE id=?", (session["user_id"],)).fetchone()
+        db = get_account_db()
+        return db.execute(
+            "SELECT * FROM users WHERE id=?", (session["user_id"],)
+        ).fetchone()
     return None
+
+
+def role_level(user):
+    if not user:
+        return 0
+    return ROLE_LEVELS.get(user["role"], 0)
+
 
 def login_required(f):
     @wraps(f)
@@ -96,6 +227,21 @@ def login_required(f):
         return f(*args, **kwargs)
     return wrapper
 
+
+def creator_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Vui lòng đăng nhập.", "warning")
+            return redirect(url_for("login"))
+        user = get_current_user()
+        if not user or role_level(user) < ROLE_LEVELS["creators"]:
+            flash("Bạn không có quyền truy cập.", "danger")
+            return redirect(url_for("home"))
+        return f(*args, **kwargs)
+    return wrapper
+
+
 def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -103,26 +249,130 @@ def admin_required(f):
             flash("Vui lòng đăng nhập.", "warning")
             return redirect(url_for("login"))
         user = get_current_user()
-        if not user or user["role"] not in ("admin", "superadmin"):
+        if not user or role_level(user) < ROLE_LEVELS["trial_admin"]:
             flash("Bạn không có quyền truy cập.", "danger")
             return redirect(url_for("home"))
         return f(*args, **kwargs)
     return wrapper
 
+
+# ── Text rendering helpers ──────────────────────────────────────────────────
+
+
+def render_text_with_links(text):
+    parts = []
+    last_end = 0
+    for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", text):
+        before = str(escape(text[last_end : m.start()])).replace("\n", "<br>")
+        parts.append(before)
+        link_text = str(escape(m.group(1)))
+        link_url = str(escape(m.group(2)))
+        parts.append(
+            f'<a href="{link_url}" style="color:#1976d2;text-decoration:underline" target="_blank">{link_text}</a>'
+        )
+        last_end = m.end()
+    after = str(escape(text[last_end:])).replace("\n", "<br>")
+    parts.append(after)
+    return "".join(parts)
+
+
+def build_style_css(style):
+    css = []
+    if style.get("color"):
+        css.append(f"color:{escape(style['color'])}")
+    if style.get("bold"):
+        css.append("font-weight:bold")
+    if style.get("italic"):
+        css.append("font-style:italic")
+    td = []
+    if style.get("strikethrough"):
+        td.append("line-through")
+    if style.get("underline"):
+        td.append("underline")
+    if td:
+        css.append(f"text-decoration:{' '.join(td)}")
+    return ";".join(css)
+
+
+def render_modules_html(modules_json):
+    try:
+        modules = json.loads(modules_json) if isinstance(modules_json, str) else modules_json
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not modules:
+        return ""
+    parts = []
+    for mod in modules:
+        mt = mod.get("type", "text")
+        content = mod.get("content", "")
+        images = mod.get("images", [])
+        style = mod.get("style", {})
+        link = mod.get("link", {})
+        css = build_style_css(style)
+        style_attr = f' style="{css}"' if css else ""
+
+        if mt == "text":
+            parts.append(f'<div class="mod-text"{style_attr}>{render_text_with_links(content)}</div>')
+
+        elif mt == "image" and images:
+            parts.append(f'<div class="mod-image"><img src="/{escape(images[0])}" alt="" loading="lazy"></div>')
+
+        elif mt == "image_left_text" and images:
+            img = f'<img src="/{escape(images[0])}" alt="" loading="lazy">'
+            parts.append(
+                f'<div class="mod-img-text"{style_attr}>'
+                f'<div class="mod-img-side">{img}</div>'
+                f'<div class="mod-text-side">{render_text_with_links(content)}</div></div>'
+            )
+
+        elif mt == "image_right_text" and images:
+            img = f'<img src="/{escape(images[0])}" alt="" loading="lazy">'
+            parts.append(
+                f'<div class="mod-text-img"{style_attr}>'
+                f'<div class="mod-text-side">{render_text_with_links(content)}</div>'
+                f'<div class="mod-img-side">{img}</div></div>'
+            )
+
+        elif mt == "double_image":
+            imgs = "".join(f'<img src="/{escape(i)}" alt="" loading="lazy">' for i in images[:2])
+            parts.append(f'<div class="mod-images mod-images-2">{imgs}</div>')
+
+        elif mt == "triple_image":
+            imgs = "".join(f'<img src="/{escape(i)}" alt="" loading="lazy">' for i in images[:3])
+            parts.append(f'<div class="mod-images mod-images-3">{imgs}</div>')
+
+        elif mt == "quad_image":
+            imgs = "".join(f'<img src="/{escape(i)}" alt="" loading="lazy">' for i in images[:4])
+            parts.append(f'<div class="mod-images mod-images-4">{imgs}</div>')
+
+        elif mt == "link_preview":
+            url = str(escape(link.get("url", "#")))
+            title = str(escape(link.get("title", url)))
+            desc = str(escape(link.get("description", "")))
+            parts.append(
+                f'<a href="{url}" class="mod-link-preview" target="_blank">'
+                f'<div class="mod-link-title">{title}</div>'
+                f'<div class="mod-link-desc">{desc}</div></a>'
+            )
+    return "\n".join(parts)
+
+
 # ── Render helper ───────────────────────────────────────────────────────────
+
 
 def render_page(title, body_html, status=200):
     user = get_current_user()
     year = datetime.now(timezone.utc).year
     flashes = ""
-    for cat, msg in get_flashed_messages_list():
+    for cat, msg in _flask_gfm(with_categories=True):
         flashes += f'<div class="flash {cat}">{msg}</div>'
     nav_extra = ""
     if user:
-        if user["role"] in ("admin", "superadmin"):
-            nav_extra = f"""
-            <a href="{url_for('admin_panel')}">Admin</a>
-            <a href="{url_for('creator')}">Tạo bài</a>"""
+        rl = role_level(user)
+        if rl >= ROLE_LEVELS["creators"]:
+            nav_extra += f'\n<a href="{url_for("creator")}">Tạo bài</a>'
+        if rl >= ROLE_LEVELS["trial_admin"]:
+            nav_extra += f'\n<a href="{url_for("admin_panel")}">Admin</a>'
         nav_extra += f'\n<a href="{url_for("logout")}">Đăng xuất</a>'
     else:
         nav_extra = f'<a href="{url_for("login")}">Đăng nhập</a>'
@@ -143,25 +393,9 @@ def render_page(title, body_html, status=200):
     html = html.replace("{{URL_COPYRIGHT}}", url_for("ban_quyen"))
     html = html.replace("{{URL_ADMIN}}", url_for("admin_panel"))
     html = html.replace("{{URL_CREATOR}}", url_for("creator"))
+    html = html.replace("{{LOGO_URL}}", LOGO_URL)
     return html, status
 
-def get_flashed_messages_list():
-    msgs = []
-    for item in flask_get_flashed():
-        msgs.append(item)
-    return msgs
-
-# We need the raw flask function
-from flask import get_flashed_messages as _flask_gfm
-
-def flask_get_flashed():
-    result = []
-    for cat, msg in _flask_gfm(with_categories=True):
-        result.append((cat, msg))
-    return result
-
-def get_flashed_messages_list():
-    return flask_get_flashed()
 
 # ── Layout ──────────────────────────────────────────────────────────────────
 
@@ -181,7 +415,7 @@ body{font-family:'Segoe UI','Roboto',Arial,sans-serif;background:var(--bg);color
 header{background:linear-gradient(135deg,var(--primary) 0%,var(--primary-dark) 100%);color:var(--white);position:sticky;top:0;z-index:1000;box-shadow:0 2px 12px rgba(0,0,0,.18)}
 .header-inner{max-width:1200px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 16px;height:64px}
 .logo{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--white)}
-.logo-icon{width:42px;height:42px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.3rem;font-weight:900;color:var(--primary-dark)}
+.logo-img{width:42px;height:42px;border-radius:50%;object-fit:cover;background:var(--white)}
 .logo-text{font-size:1.15rem;font-weight:700;letter-spacing:.5px;line-height:1.2}
 .logo-sub{font-size:.72rem;font-weight:400;opacity:.85}
 nav{display:flex;align-items:center;gap:2px}
@@ -209,7 +443,7 @@ main{max-width:1200px;margin:0 auto;padding:24px 16px 48px;flex:1;width:100%}
 .page-content p{margin-bottom:12px}
 .page-content ul,.page-content ol{margin-left:24px;margin-bottom:12px}
 .form-container{max-width:480px;margin:32px auto;background:var(--white);padding:36px;border-radius:12px;box-shadow:var(--shadow)}
-.form-container.wide{max-width:720px}
+.form-container.wide{max-width:860px}
 .form-container h2{text-align:center;color:var(--primary);margin-bottom:24px;font-size:1.4rem}
 .form-group{margin-bottom:18px}
 .form-group label{display:block;margin-bottom:6px;font-weight:600;font-size:.9rem;color:#333}
@@ -250,14 +484,19 @@ footer{background:#1a1a1a;color:#ccc;padding:36px 16px 20px;margin-top:auto}
 .sidebar .widget li a{color:var(--text);text-decoration:none;font-size:.88rem}
 .sidebar .widget li a:hover{color:var(--primary)}
 .badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.72rem;font-weight:600;text-transform:uppercase}
+.badge-creators{background:#e8f5e9;color:#2e7d32}
+.badge-trial_moderator{background:#e3f2fd;color:#1565c0}
+.badge-moderator{background:#e3f2fd;color:#0d47a1}
+.badge-trial_admin{background:#fff3e0;color:#e65100}
 .badge-admin{background:var(--primary);color:var(--white)}
+.badge-headadmin{background:var(--accent);color:var(--primary-dark)}
 .badge-user{background:#e3f2fd;color:#1565c0}
-.badge-superadmin{background:var(--accent);color:var(--primary-dark)}
 .post-header{margin-bottom:20px}
 .post-header h1{font-size:1.8rem;color:var(--primary);line-height:1.3}
 .post-meta{color:#888;font-size:.85rem;margin-top:8px}
 .post-body{font-size:1rem;line-height:1.8}
 .post-body p{margin-bottom:14px}
+.post-desc{color:#555;font-size:1rem;margin:12px 0 20px;padding:12px 16px;background:#f9f9f9;border-left:3px solid var(--accent);border-radius:4px}
 .quick-links{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin:20px 0}
 .quick-link{background:var(--white);border-radius:10px;padding:20px;text-align:center;box-shadow:var(--shadow);transition:transform .2s;text-decoration:none;color:var(--text)}
 .quick-link:hover{transform:translateY(-3px)}
@@ -270,6 +509,23 @@ footer{background:#1a1a1a;color:#ccc;padding:36px 16px 20px;margin-top:auto}
 details{background:var(--white);padding:16px;border-radius:8px;margin-bottom:8px;box-shadow:var(--shadow)}
 summary{cursor:pointer;font-weight:600;color:var(--primary)}
 .cb-label{display:flex;align-items:center;gap:8px;font-weight:400!important;cursor:pointer}
+/* Module rendering styles */
+.mod-text{margin:16px 0;line-height:1.8}
+.mod-image{margin:16px 0;text-align:center}
+.mod-image img{max-width:100%;border-radius:8px;box-shadow:var(--shadow)}
+.mod-img-text,.mod-text-img{display:flex;gap:20px;margin:16px 0;align-items:flex-start;flex-wrap:wrap}
+.mod-img-side{flex:0 0 40%;max-width:40%}
+.mod-img-side img{width:100%;border-radius:8px;box-shadow:var(--shadow)}
+.mod-text-side{flex:1;min-width:200px;line-height:1.8}
+.mod-images{display:grid;gap:12px;margin:16px 0}
+.mod-images img{width:100%;border-radius:8px;box-shadow:var(--shadow);object-fit:cover}
+.mod-images-2{grid-template-columns:1fr 1fr}
+.mod-images-3{grid-template-columns:1fr 1fr 1fr}
+.mod-images-4{grid-template-columns:1fr 1fr}
+.mod-link-preview{display:block;border:2px solid var(--border);border-radius:10px;padding:20px;margin:16px 0;text-decoration:none;color:var(--text);transition:border-color .2s,box-shadow .2s}
+.mod-link-preview:hover{border-color:var(--primary);box-shadow:var(--shadow)}
+.mod-link-title{font-size:1.1rem;font-weight:700;color:var(--primary);margin-bottom:6px}
+.mod-link-desc{font-size:.9rem;color:#666}
 @media(max-width:768px){
 .header-inner{height:56px}
 nav{display:none;flex-direction:column;position:absolute;top:56px;left:0;right:0;background:var(--primary-dark);padding:12px 0;box-shadow:0 4px 12px rgba(0,0,0,.2)}
@@ -286,6 +542,10 @@ nav a{padding:12px 24px;border-radius:0}
 .quick-links{grid-template-columns:repeat(2,1fr)}
 .stats-bar{flex-direction:column}
 .logo-text{font-size:.95rem}
+.mod-img-text,.mod-text-img{flex-direction:column}
+.mod-img-side{flex:none;max-width:100%}
+.mod-images-3{grid-template-columns:1fr}
+.mod-images-4{grid-template-columns:1fr 1fr}
 }
 </style>
 </head>
@@ -299,7 +559,7 @@ nav a{padding:12px 24px;border-radius:0}
 <header>
 <div class="header-inner">
     <a href="{{URL_HOME}}" class="logo">
-        <div class="logo-icon">H</div>
+        <img src="{{LOGO_URL}}" alt="HNPP" class="logo-img">
         <div>
             <div class="logo-text">HNPP</div>
             <div class="logo-sub">Hanoi Academy People's Police</div>
@@ -355,27 +615,35 @@ document.querySelectorAll('nav a').forEach(function(a){
 </body>
 </html>"""
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. TRANG CHỦ
+# 1. TRANG CHU
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/")
 def home():
-    db = get_db()
-    posts = db.execute("SELECT * FROM posts WHERE is_published=1 ORDER BY created_at DESC LIMIT 6").fetchall()
+    db = get_baidang_db()
+    posts = db.execute(
+        "SELECT * FROM posts WHERE is_published=1 ORDER BY created_at DESC LIMIT 6"
+    ).fetchall()
     pc = db.execute("SELECT COUNT(*) FROM posts WHERE is_published=1").fetchone()[0]
-    uc = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    uc = get_account_db().execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
     cards = ""
     for p in posts:
-        snippet = p["content"][:150] + ("..." if len(p["content"]) > 150 else "")
+        raw = p["content"]
+        snippet = str(escape(raw[:150])) + ("..." if len(raw) > 150 else "")
         cards += f"""<div class="card">
-            <h3><a href="{url_for('view_post', slug=p['slug'])}">{p['title']}</a></h3>
+            <h3><a href="{url_for('view_post', slug=p['slug'])}">{escape(p['title'])}</a></h3>
             <p>{snippet}</p>
             <div class="meta">{p['category']} &bull; {p['created_at'][:16]}</div>
         </div>"""
     if not posts:
         cards = '<div class="page-content"><p>Chưa có bài đăng nào.</p></div>'
+
+    cat_items = ""
+    for c in CATEGORIES:
+        cat_items += f'<li><a href="{{{{URL_POSTS}}}}?cat={c}">{c}</a></li>'
 
     body = f"""
     <div class="banner">
@@ -386,7 +654,7 @@ def home():
         <div class="stats-bar">
             <div class="stat-item"><div class="num">{pc}</div><div class="label">Bài đăng</div></div>
             <div class="stat-item"><div class="num">{uc}</div><div class="label">Thành viên</div></div>
-            <div class="stat-item"><div class="num">12</div><div class="label">Chuyên mục</div></div>
+            <div class="stat-item"><div class="num">{len(CATEGORIES)}</div><div class="label">Mục</div></div>
             <div class="stat-item"><div class="num">24/7</div><div class="label">Hỗ trợ</div></div>
         </div>
         <div class="quick-links">
@@ -404,14 +672,8 @@ def home():
             </div>
             <div class="sidebar">
                 <div class="widget">
-                    <h4>Chuyên mục</h4>
-                    <ul>
-                        <li><a href="{{{{URL_LUAT}}}}">Luật HNPP</a></li>
-                        <li><a href="{{{{URL_POSTS}}}}">Tin tức</a></li>
-                        <li><a href="{{{{URL_GAME}}}}">Group Game</a></li>
-                        <li><a href="{{{{URL_SUPPORT}}}}">Hỗ trợ</a></li>
-                        <li><a href="{{{{URL_POLICY}}}}">Chính sách</a></li>
-                    </ul>
+                    <h4>Mục</h4>
+                    <ul>{cat_items}</ul>
                 </div>
                 <div class="widget">
                     <h4>Thông báo</h4>
@@ -422,8 +684,9 @@ def home():
     </main>"""
     return render_page("Trang chủ", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. ĐĂNG NHẬP
+# 2. DANG NHAP
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/login", methods=["GET", "POST"])
@@ -431,9 +694,11 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        if user and user["password_hash"] == hash_password(password):
+        db = get_account_db()
+        user = db.execute(
+            "SELECT * FROM users WHERE username=?", (username,)
+        ).fetchone()
+        if user and check_password_hash(user["password_hash"], password):
             session["user_id"] = user["id"]
             flash(f"Xin chào, {user['display_name']}!", "success")
             return redirect(url_for("home"))
@@ -453,30 +718,38 @@ def login():
     </div></main>"""
     return render_page("Đăng nhập", body)
 
+
 @app.route("/logout")
 def logout():
     session.clear()
     flash("Đã đăng xuất.", "info")
     return redirect(url_for("home"))
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. TRANG ẨN - MOD
+# 3. TRANG AN - MOD
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/mod")
 def mod_page():
     key = request.args.get("key", "")
     passw = request.args.get(MOD_PASS_PARAM, "")
-    if key != MOD_KEY or passw == "":
+    if key != MOD_KEY or passw != MOD_PASS:
         abort(404)
-    db = get_db()
+    db = get_account_db()
     users = db.execute("SELECT * FROM users ORDER BY id").fetchall()
+
+    role_opts = "".join(
+        f'<option value="{r}">{ROLE_LABELS[r]}</option>' for r in ROLE_LEVELS
+    )
 
     rows = ""
     for u in users:
+        badge_cls = f"badge-{u['role']}"
+        label = ROLE_LABELS.get(u["role"], u["role"])
         rows += f"""<tr>
             <td>{u['id']}</td><td>{u['username']}</td><td>{u['display_name']}</td>
-            <td><span class="badge badge-{u['role']}">{u['role']}</span></td>
+            <td><span class="badge {badge_cls}">{label}</span></td>
             <td>{u['created_at'][:16]}</td>
             <td><form method="POST" action="{url_for('mod_delete')}" style="display:inline">
                 <input type="hidden" name="mod_key" value="{key}">
@@ -496,7 +769,7 @@ def mod_page():
             <div class="form-group"><label>Tên hiển thị</label><input type="text" name="display_name" required placeholder="Tên hiển thị"></div>
             <div class="form-group"><label>Mật khẩu</label><input type="password" name="password" required placeholder="Mật khẩu"></div>
             <div class="form-group"><label>Quyền hạn</label>
-                <select name="role"><option value="user">User</option><option value="admin">Admin</option><option value="superadmin">Super Admin</option></select></div>
+                <select name="role">{role_opts}</select></div>
             <button type="submit" class="btn btn-full btn-accent">Tạo tài khoản</button>
         </form>
         <div style="margin-top:32px">
@@ -509,73 +782,349 @@ def mod_page():
     </div></main>"""
     return render_page("Quản lý tài khoản", body)
 
+
 @app.route("/mod/create", methods=["POST"])
 def mod_create():
     key = request.form.get("mod_key", "")
     passw = request.form.get("mod_pass", "")
-    if key != MOD_KEY or passw == "":
+    if key != MOD_KEY or passw != MOD_PASS:
         abort(404)
     username = request.form.get("username", "").strip()
     display_name = request.form.get("display_name", "").strip()
     password = request.form.get("password", "")
-    role = request.form.get("role", "user")
+    role = request.form.get("role", "creators")
+    if role not in ROLE_LEVELS:
+        role = "creators"
     if not username or not password:
         flash("Vui lòng điền đầy đủ thông tin.", "warning")
         return redirect(f"/mod?key={key}&{MOD_PASS_PARAM}={passw}")
-    db = get_db()
+    db = get_account_db()
     try:
-        db.execute("INSERT INTO users (username,password_hash,display_name,role) VALUES (?,?,?,?)",
-                   (username, hash_password(password), display_name, role))
+        pw_hash = generate_password_hash(password)
+        pw_enc = encrypt_password(password)
+        db.execute(
+            "INSERT INTO users (username,password_hash,password_enc,display_name,role) VALUES (?,?,?,?,?)",
+            (username, pw_hash, pw_enc, display_name, role),
+        )
         db.commit()
         flash(f"Tạo tài khoản '{username}' thành công!", "success")
     except sqlite3.IntegrityError:
         flash(f"Tên đăng nhập '{username}' đã tồn tại.", "danger")
     return redirect(f"/mod?key={key}&{MOD_PASS_PARAM}={passw}")
 
+
 @app.route("/mod/delete", methods=["POST"])
 def mod_delete():
     key = request.form.get("mod_key", "")
     passw = request.form.get("mod_pass", "")
-    if key != MOD_KEY or passw == "":
+    if key != MOD_KEY or passw != MOD_PASS:
         abort(404)
-    db = get_db()
+    db = get_account_db()
     db.execute("DELETE FROM users WHERE id=?", (request.form.get("user_id"),))
     db.commit()
     flash("Đã xóa tài khoản.", "success")
     return redirect(f"/mod?key={key}&{MOD_PASS_PARAM}={passw}")
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. CREATOR
+# 4. CREATOR - Content Builder
 # ═══════════════════════════════════════════════════════════════════════════
 
+CREATOR_CSS = """
+<style>
+.desc-counter{text-align:right;font-size:.78rem;color:#888;margin-top:4px}
+.desc-counter.over{color:#c62828}
+.builder-toolbar{display:flex;gap:10px;margin:20px 0;flex-wrap:wrap;align-items:center}
+.btn-add{background:var(--primary);color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:1rem;cursor:pointer;display:flex;align-items:center;gap:6px;font-weight:600}
+.btn-add:hover{background:var(--primary-dark)}
+.add-modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:2000;align-items:center;justify-content:center}
+.add-modal-overlay.show{display:flex}
+.add-modal{background:#fff;border-radius:14px;padding:28px;max-width:700px;width:95%;max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)}
+.add-modal h3{color:var(--primary);margin-bottom:20px;text-align:center;font-size:1.2rem}
+.module-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
+.module-option{border:2px solid var(--border);border-radius:10px;padding:14px 10px;text-align:center;cursor:pointer;transition:border-color .2s,transform .2s}
+.module-option:hover{border-color:var(--primary);transform:translateY(-2px)}
+.module-option .illust{height:60px;display:flex;align-items:center;justify-content:center;margin-bottom:8px}
+.module-option span{font-size:.82rem;font-weight:600;color:#333}
+.illust-lines div{width:70%;height:3px;background:#bbb;margin:3px auto;border-radius:2px}
+.illust-lines div:nth-child(2){width:55%}
+.illust-img{width:60px;height:45px;background:#e3f2fd;border:2px dashed #90caf9;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.3rem}
+.illust-row{display:flex;gap:4px;align-items:stretch}
+.illust-box{background:#e3f2fd;border:1px solid #90caf9;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:.7rem;color:#1565c0}
+.illust-lines-sm div{width:100%;height:2px;background:#bbb;margin:2px 0;border-radius:1px}
+.illust-link{width:80%;border:2px solid #90caf9;border-radius:6px;padding:6px;text-align:left}
+.illust-link div:first-child{height:3px;width:60%;background:#1565c0;border-radius:2px;margin-bottom:4px}
+.illust-link div:last-child{height:2px;width:90%;background:#bbb;border-radius:2px}
+#modulesList{margin:16px 0}
+.module-card{background:#fff;border:2px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px;position:relative;transition:border-color .2s}
+.module-card:hover{border-color:var(--primary)}
+.module-card .module-type-label{font-size:.72rem;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:8px}
+.module-toolbar{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #f0f0f0;align-items:center}
+.module-toolbar button,.module-toolbar label{padding:5px 10px;border:1px solid var(--border);border-radius:5px;cursor:pointer;font-size:.8rem;background:#fff;transition:background .2s}
+.module-toolbar button:hover,.module-toolbar label:hover{background:#f5f5f5}
+.module-toolbar button.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.module-toolbar .tb-bold{font-weight:700}
+.module-toolbar .tb-italic{font-style:italic}
+.module-toolbar .tb-strike{text-decoration:line-through}
+.module-toolbar .tb-under{text-decoration:underline}
+.module-toolbar .tb-del{background:#ffebee;color:#c62828;border-color:#ef9a9a}
+.module-toolbar .tb-del:hover{background:#c62828;color:#fff}
+.module-toolbar .tb-edit{background:#e3f2fd;color:#1565c0;border-color:#90caf9}
+.module-toolbar input[type=color]{width:32px;height:28px;border:1px solid var(--border);border-radius:5px;cursor:pointer;padding:0}
+.module-content textarea{width:100%;min-height:100px;padding:10px;border:2px solid var(--border);border-radius:8px;font-family:inherit;font-size:.95rem;resize:vertical}
+.module-content textarea:focus{border-color:var(--primary);outline:none}
+.module-content .img-preview{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.module-content .img-preview img{width:120px;height:90px;object-fit:cover;border-radius:6px;border:2px solid var(--border)}
+.module-content .img-upload-area{border:2px dashed var(--border);border-radius:8px;padding:20px;text-align:center;cursor:pointer;margin-top:8px;transition:border-color .2s}
+.module-content .img-upload-area:hover{border-color:var(--primary)}
+.module-content .link-input{margin-top:8px}
+.module-content .link-input input{width:100%;padding:8px 12px;border:2px solid var(--border);border-radius:8px;font-size:.9rem}
+.module-content .link-input input:focus{border-color:var(--primary);outline:none}
+.module-content .link-preview-box{border:2px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;background:#f9f9f9}
+.module-content .link-preview-box h4{color:var(--primary);margin-bottom:4px;font-size:.95rem}
+.module-content .link-preview-box p{color:#666;font-size:.85rem;margin:0}
+.module-text-preview{padding:8px 0;line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+</style>
+"""
+
+CREATOR_JS = """
+<script>
+let modules = [];
+const UPLOAD_URL = '/api/upload-image';
+const LINK_PREVIEW_URL = '/api/link-preview';
+
+const TYPE_LABELS = {
+    'text': 'Nội dung',
+    'image': 'Hình ảnh',
+    'image_left_text': 'Hình trái + Nội dung phải',
+    'image_right_text': 'Hình phải + Nội dung trái',
+    'double_image': 'Hình ảnh đôi',
+    'triple_image': 'Hình ảnh tam',
+    'quad_image': 'Hình ảnh tứ',
+    'link_preview': 'Trang khác'
+};
+
+const IMG_COUNTS = {
+    'image': 1,
+    'image_left_text': 1,
+    'image_right_text': 1,
+    'double_image': 2,
+    'triple_image': 3,
+    'quad_image': 4
+};
+
+function uid() { return 'mod_' + Math.random().toString(36).substr(2, 9); }
+
+function addModule(type) {
+    let mod = {
+        id: uid(), type: type, content: '', images: [],
+        link: {url:'', title:'', description:''},
+        style: {color:'#000000', bold:false, italic:false, strikethrough:false, underline:false}
+    };
+    modules.push(mod);
+    renderModules();
+    closeAddModal();
+}
+
+function deleteModule(idx) {
+    if(confirm('Xóa mục này?')) { modules.splice(idx, 1); renderModules(); }
+}
+
+function toggleStyle(idx, prop) {
+    modules[idx].style[prop] = !modules[idx].style[prop];
+    renderModules();
+}
+
+function updateColor(idx, val) {
+    modules[idx].style.color = val;
+    renderModules();
+}
+
+function updateContent(idx, val) {
+    modules[idx].content = val;
+}
+
+function updateLinkUrl(idx) {
+    let input = document.getElementById('link_url_'+idx);
+    let url = input.value.trim();
+    modules[idx].link.url = url;
+    if(url) fetchLinkPreview(idx, url);
+}
+
+function fetchLinkPreview(idx, url) {
+    fetch(LINK_PREVIEW_URL + '?url=' + encodeURIComponent(url))
+    .then(r => r.json())
+    .then(data => {
+        modules[idx].link.title = data.title || url;
+        modules[idx].link.description = data.description || '';
+        renderModules();
+    })
+    .catch(() => {
+        modules[idx].link.title = url;
+        modules[idx].link.description = '';
+        renderModules();
+    });
+}
+
+function uploadImage(idx, imgIdx, fileInput) {
+    let file = fileInput.files[0];
+    if(!file) return;
+    let ext = file.name.split('.').pop().toLowerCase();
+    if(!['jpg','jpeg','png','webp'].includes(ext)) {
+        alert('Chỉ hỗ trợ JPG, PNG, WebP');
+        return;
+    }
+    let fd = new FormData();
+    fd.append('image', file);
+    fetch(UPLOAD_URL, {method:'POST', body:fd})
+    .then(r => r.json())
+    .then(data => {
+        if(data.error) { alert(data.error); return; }
+        while(modules[idx].images.length <= imgIdx) modules[idx].images.push('');
+        modules[idx].images[imgIdx] = data.path;
+        renderModules();
+    })
+    .catch(e => alert('Lỗi tải ảnh: '+e));
+}
+
+function openAddModal() { document.getElementById('addModalOverlay').classList.add('show'); }
+function closeAddModal() { document.getElementById('addModalOverlay').classList.remove('show'); }
+
+function renderModules() {
+    let container = document.getElementById('modulesList');
+    let html = '';
+    modules.forEach((mod, idx) => {
+        let s = mod.style;
+        let boldActive = s.bold ? ' active' : '';
+        let italicActive = s.italic ? ' active' : '';
+        let strikeActive = s.strikethrough ? ' active' : '';
+        let underActive = s.underline ? ' active' : '';
+
+        html += '<div class="module-card">';
+        html += '<div class="module-type-label">' + (TYPE_LABELS[mod.type]||mod.type) + '</div>';
+
+        // Toolbar
+        html += '<div class="module-toolbar">';
+        html += '<input type="color" value="'+(s.color||'#000000')+'" onchange="updateColor('+idx+',this.value)" title="Sửa màu">';
+        html += '<button type="button" class="tb-bold'+boldActive+'" onclick="toggleStyle('+idx+',\\'bold\\')" title="In đậm">B</button>';
+        html += '<button type="button" class="tb-italic'+italicActive+'" onclick="toggleStyle('+idx+',\\'italic\\')" title="In nghiêng">I</button>';
+        html += '<button type="button" class="tb-strike'+strikeActive+'" onclick="toggleStyle('+idx+',\\'strikethrough\\')" title="Gạch giữa">S</button>';
+        html += '<button type="button" class="tb-under'+underActive+'" onclick="toggleStyle('+idx+',\\'underline\\')" title="Gạch chân">U</button>';
+        html += '<button type="button" class="tb-del" onclick="deleteModule('+idx+')" title="Xóa">Xóa</button>';
+        html += '</div>';
+
+        // Content area
+        html += '<div class="module-content">';
+
+        if(mod.type === 'text') {
+            html += '<textarea onchange="updateContent('+idx+',this.value)" placeholder="Nhập nội dung... Hỗ trợ [text](url) cho link">'+escHtml(mod.content)+'</textarea>';
+        }
+        else if(mod.type === 'link_preview') {
+            html += '<div class="link-input"><input type="text" id="link_url_'+idx+'" value="'+escHtml(mod.link.url)+'" placeholder="Nhập URL trang..." onblur="updateLinkUrl('+idx+')"></div>';
+            if(mod.link.title) {
+                html += '<div class="link-preview-box"><h4>'+escHtml(mod.link.title)+'</h4><p>'+escHtml(mod.link.description)+'</p></div>';
+            }
+        }
+        else {
+            // Types with images
+            let imgCount = IMG_COUNTS[mod.type] || 1;
+            let hasText = mod.type === 'image_left_text' || mod.type === 'image_right_text';
+
+            html += '<div class="img-preview">';
+            for(let i=0; i<imgCount; i++) {
+                if(mod.images[i]) {
+                    html += '<img src="/'+escHtml(mod.images[i])+'" alt="">';
+                }
+            }
+            html += '</div>';
+
+            for(let i=0; i<imgCount; i++) {
+                html += '<div class="img-upload-area">';
+                html += '<input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="uploadImage('+idx+','+i+',this)" style="width:100%">';
+                html += '<div style="font-size:.8rem;color:#888;margin-top:4px">Hình '+(i+1)+' (JPG, PNG, WebP)</div>';
+                html += '</div>';
+            }
+
+            if(hasText) {
+                html += '<textarea onchange="updateContent('+idx+',this.value)" placeholder="Nhập nội dung..." style="margin-top:10px">'+escHtml(mod.content)+'</textarea>';
+            }
+        }
+
+        html += '</div></div>';
+    });
+    container.innerHTML = html;
+}
+
+function escHtml(s) {
+    if(!s) return '';
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function serializeModules() {
+    document.getElementById('content_modules_input').value = JSON.stringify(modules);
+    // Generate plain text content summary
+    let summary = '';
+    modules.forEach(m => {
+        if(m.content) summary += m.content + '\\n';
+        if(m.type === 'image') summary += '[Hình ảnh]\\n';
+        if(m.type.includes('image') && m.type !== 'image') summary += '[Hình ảnh + Nội dung]\\n';
+        if(m.type === 'link_preview') summary += '[Link: '+(m.link.title||m.link.url)+']\\n';
+    });
+    document.getElementById('content_input').value = summary.trim();
+    return true;
+}
+
+function descCounter() {
+    let ta = document.getElementById('desc_input');
+    let counter = document.getElementById('desc_counter');
+    let len = ta.value.length;
+    counter.textContent = len + '/500';
+    counter.className = 'desc-counter' + (len > 500 ? ' over' : '');
+}
+
+// Initialize modules from existing data (for edit mode)
+function initModules(data) {
+    try { modules = JSON.parse(data); } catch(e) { modules = []; }
+    renderModules();
+}
+</script>
+"""
+
+
 @app.route("/creator", methods=["GET", "POST"])
-@admin_required
+@creator_required
 def creator():
-    db = get_db()
+    db = get_baidang_db()
     if request.method == "POST":
         title = request.form.get("title", "").strip()
+        description = request.form.get("description", "").strip()[:500]
         content = request.form.get("content", "").strip()
+        content_modules = request.form.get("content_modules", "[]")
         category = request.form.get("category", "Tin tức")
         is_published = 1 if request.form.get("is_published") else 0
         slug = slugify(title)
-        if not title or not content:
-            flash("Vui lòng điền đầy đủ tiêu đề và nội dung.", "warning")
+        if not title:
+            flash("Vui lòng điền tiêu đề.", "warning")
         else:
             if db.execute("SELECT id FROM posts WHERE slug=?", (slug,)).fetchone():
                 slug += "-" + secrets.token_hex(3)
-            db.execute("INSERT INTO posts (title,slug,content,category,author_id,is_published) VALUES (?,?,?,?,?,?)",
-                       (title, slug, content, category, session["user_id"], is_published))
+            db.execute(
+                "INSERT INTO posts (title,slug,description,content,content_modules,category,author_id,is_published) VALUES (?,?,?,?,?,?,?,?)",
+                (title, slug, description, content, content_modules, category, session["user_id"], is_published),
+            )
             db.commit()
             flash("Đăng bài thành công!", "success")
             return redirect(url_for("creator"))
 
-    my_posts = db.execute("SELECT * FROM posts WHERE author_id=? ORDER BY created_at DESC",
-                          (session["user_id"],)).fetchall()
+    my_posts = db.execute(
+        "SELECT * FROM posts WHERE author_id=? ORDER BY created_at DESC",
+        (session["user_id"],),
+    ).fetchall()
     rows = ""
     for p in my_posts:
         status = "Xuất bản" if p["is_published"] else "Nháp"
         rows += f"""<tr>
-            <td><a href="{url_for('view_post', slug=p['slug'])}">{p['title']}</a></td>
+            <td><a href="{url_for('view_post', slug=p['slug'])}">{escape(p['title'])}</a></td>
             <td>{p['category']}</td><td>{p['created_at'][:16]}</td><td>{status}</td>
             <td>
                 <a href="{url_for('edit_post', post_id=p['id'])}" class="btn btn-sm btn-outline">Sửa</a>
@@ -588,88 +1137,254 @@ def creator():
         post_table = f"""<div style="margin-top:32px">
             <div class="section-title" style="font-size:1rem">Bài đăng của bạn</div>
             <div class="table-wrapper"><table>
-                <thead><tr><th>Tiêu đề</th><th>Chuyên mục</th><th>Ngày tạo</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
+                <thead><tr><th>Tiêu đề</th><th>Mục</th><th>Ngày tạo</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table></div></div>"""
 
-    cats = "".join(f'<option value="{c}">{c}</option>'
-                   for c in ["Tin tức","Luật HNPP","Thông báo","Hướng dẫn","Group Game","Khác"])
-    body = f"""<main>
+    cats = "".join(f'<option value="{c}">{c}</option>' for c in CATEGORIES)
+
+    body = f"""{CREATOR_CSS}
+    <main>
     <div class="form-container wide">
         <h2>&#9997; Tạo bài đăng mới</h2>
-        <form method="POST">
+        <form method="POST" onsubmit="return serializeModules()">
             <div class="form-group"><label>Tiêu đề</label><input type="text" name="title" required placeholder="Nhập tiêu đề bài viết"></div>
-            <div class="form-group"><label>Chuyên mục</label><select name="category">{cats}</select></div>
-            <div class="form-group"><label>Nội dung (hỗ trợ HTML)</label><textarea name="content" required placeholder="Nhập nội dung bài viết..."></textarea></div>
+            <div class="form-group">
+                <label>Miêu tả <span style="font-weight:400;color:#888">(Giới hạn 500 ký tự)</span></label>
+                <textarea name="description" id="desc_input" maxlength="500" placeholder="Nhập miêu tả bài viết..." style="min-height:80px" oninput="descCounter()"></textarea>
+                <div class="desc-counter" id="desc_counter">0/500</div>
+            </div>
+            <div class="form-group"><label>Mục</label><select name="category">{cats}</select></div>
+
+            <div class="section-title" style="font-size:1rem;margin-top:24px">Nội dung bài đăng</div>
+            <div class="builder-toolbar">
+                <button type="button" class="btn-add" onclick="openAddModal()">&#43; Add</button>
+            </div>
+
+            <div id="modulesList"></div>
+
+            <input type="hidden" name="content_modules" id="content_modules_input" value="[]">
+            <input type="hidden" name="content" id="content_input" value="">
+
             <div class="form-group"><label class="cb-label"><input type="checkbox" name="is_published" value="1" checked> Xuất bản ngay</label></div>
             <button type="submit" class="btn btn-full">Đăng bài</button>
         </form>
         {post_table}
-    </div></main>"""
+    </div></main>
+
+    <div class="add-modal-overlay" id="addModalOverlay" onclick="if(event.target===this)closeAddModal()">
+        <div class="add-modal">
+            <h3>Chọn loại nội dung</h3>
+            <div class="module-options">
+                <div class="module-option" onclick="addModule('text')">
+                    <div class="illust"><div class="illust-lines"><div></div><div></div><div></div></div></div>
+                    <span>Nội dung</span>
+                </div>
+                <div class="module-option" onclick="addModule('image')">
+                    <div class="illust"><div class="illust-img">&#128247;</div></div>
+                    <span>Hình ảnh</span>
+                </div>
+                <div class="module-option" onclick="addModule('image_left_text')">
+                    <div class="illust"><div class="illust-row"><div class="illust-box" style="width:30px;height:40px">&#128247;</div><div class="illust-lines-sm" style="flex:1;padding-top:4px"><div></div><div></div><div></div></div></div></div>
+                    <span>Hình trái<br>Nội dung phải</span>
+                </div>
+                <div class="module-option" onclick="addModule('image_right_text')">
+                    <div class="illust"><div class="illust-row"><div class="illust-lines-sm" style="flex:1;padding-top:4px"><div></div><div></div><div></div></div><div class="illust-box" style="width:30px;height:40px">&#128247;</div></div></div>
+                    <span>Nội dung trái<br>Hình phải</span>
+                </div>
+                <div class="module-option" onclick="addModule('double_image')">
+                    <div class="illust"><div class="illust-row"><div class="illust-box" style="width:30px;height:35px">&#128247;</div><div class="illust-box" style="width:30px;height:35px">&#128247;</div></div></div>
+                    <span>Hình ảnh đôi</span>
+                </div>
+                <div class="module-option" onclick="addModule('triple_image')">
+                    <div class="illust"><div class="illust-row"><div class="illust-box" style="width:22px;height:30px">&#128247;</div><div class="illust-box" style="width:22px;height:30px">&#128247;</div><div class="illust-box" style="width:22px;height:30px">&#128247;</div></div></div>
+                    <span>Hình ảnh tam</span>
+                </div>
+                <div class="module-option" onclick="addModule('quad_image')">
+                    <div class="illust"><div style="display:grid;grid-template-columns:1fr 1fr;gap:3px"><div class="illust-box" style="width:22px;height:20px">&#128247;</div><div class="illust-box" style="width:22px;height:20px">&#128247;</div><div class="illust-box" style="width:22px;height:20px">&#128247;</div><div class="illust-box" style="width:22px;height:20px">&#128247;</div></div></div>
+                    <span>Hình ảnh tứ</span>
+                </div>
+                <div class="module-option" onclick="addModule('link_preview')">
+                    <div class="illust"><div class="illust-link"><div></div><div></div></div></div>
+                    <span>Trang khác</span>
+                </div>
+            </div>
+            <div style="text-align:center;margin-top:20px">
+                <button type="button" class="btn btn-outline" onclick="closeAddModal()">Đóng</button>
+            </div>
+        </div>
+    </div>
+    {CREATOR_JS}"""
     return render_page("Tạo bài đăng", body)
 
+
 @app.route("/creator/edit/<int:post_id>", methods=["GET", "POST"])
-@admin_required
+@creator_required
 def edit_post(post_id):
-    db = get_db()
+    db = get_baidang_db()
     post = db.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
     if not post:
         abort(404)
     if request.method == "POST":
         title = request.form.get("title", "").strip()
+        description = request.form.get("description", "").strip()[:500]
         content = request.form.get("content", "").strip()
+        content_modules = request.form.get("content_modules", "[]")
         category = request.form.get("category", "Tin tức")
         is_published = 1 if request.form.get("is_published") else 0
-        db.execute("UPDATE posts SET title=?,content=?,category=?,is_published=?,updated_at=datetime('now') WHERE id=?",
-                   (title, content, category, is_published, post_id))
+        db.execute(
+            "UPDATE posts SET title=?,description=?,content=?,content_modules=?,category=?,is_published=?,updated_at=datetime('now') WHERE id=?",
+            (title, description, content, content_modules, category, is_published, post_id),
+        )
         db.commit()
         flash("Cập nhật thành công!", "success")
         return redirect(url_for("creator"))
 
-    all_cats = ["Tin tức","Luật HNPP","Thông báo","Hướng dẫn","Group Game","Khác"]
-    opts = "".join(f'<option value="{c}" {"selected" if post["category"]==c else ""}>{c}</option>' for c in all_cats)
+    cats = "".join(
+        f'<option value="{c}" {"selected" if post["category"]==c else ""}>{c}</option>'
+        for c in CATEGORIES
+    )
     checked = "checked" if post["is_published"] else ""
-    from markupsafe import escape
-    body = f"""<main>
+    desc_val = str(escape(post["description"])) if post["description"] else ""
+    modules_json = post["content_modules"] if post["content_modules"] else "[]"
+    modules_escaped = str(escape(modules_json))
+
+    body = f"""{CREATOR_CSS}
+    <main>
     <div class="form-container wide">
         <h2>&#9997; Chỉnh sửa bài đăng</h2>
-        <form method="POST">
+        <form method="POST" onsubmit="return serializeModules()">
             <div class="form-group"><label>Tiêu đề</label><input type="text" name="title" required value="{escape(post['title'])}"></div>
-            <div class="form-group"><label>Chuyên mục</label><select name="category">{opts}</select></div>
-            <div class="form-group"><label>Nội dung (hỗ trợ HTML)</label><textarea name="content" required>{escape(post['content'])}</textarea></div>
+            <div class="form-group">
+                <label>Miêu tả <span style="font-weight:400;color:#888">(Giới hạn 500 ký tự)</span></label>
+                <textarea name="description" id="desc_input" maxlength="500" style="min-height:80px" oninput="descCounter()">{desc_val}</textarea>
+                <div class="desc-counter" id="desc_counter">{len(post['description'] or '')}/500</div>
+            </div>
+            <div class="form-group"><label>Mục</label><select name="category">{cats}</select></div>
+
+            <div class="section-title" style="font-size:1rem;margin-top:24px">Nội dung bài đăng</div>
+            <div class="builder-toolbar">
+                <button type="button" class="btn-add" onclick="openAddModal()">&#43; Add</button>
+            </div>
+            <div id="modulesList"></div>
+            <input type="hidden" name="content_modules" id="content_modules_input" value="">
+            <input type="hidden" name="content" id="content_input" value="{escape(post['content'])}">
+
             <div class="form-group"><label class="cb-label"><input type="checkbox" name="is_published" value="1" {checked}> Xuất bản</label></div>
             <button type="submit" class="btn btn-full">Cập nhật</button>
         </form>
-    </div></main>"""
+    </div></main>
+
+    <div class="add-modal-overlay" id="addModalOverlay" onclick="if(event.target===this)closeAddModal()">
+        <div class="add-modal">
+            <h3>Chọn loại nội dung</h3>
+            <div class="module-options">
+                <div class="module-option" onclick="addModule('text')"><div class="illust"><div class="illust-lines"><div></div><div></div><div></div></div></div><span>Nội dung</span></div>
+                <div class="module-option" onclick="addModule('image')"><div class="illust"><div class="illust-img">&#128247;</div></div><span>Hình ảnh</span></div>
+                <div class="module-option" onclick="addModule('image_left_text')"><div class="illust"><div class="illust-row"><div class="illust-box" style="width:30px;height:40px">&#128247;</div><div class="illust-lines-sm" style="flex:1;padding-top:4px"><div></div><div></div><div></div></div></div></div><span>Hình trái + Nội dung phải</span></div>
+                <div class="module-option" onclick="addModule('image_right_text')"><div class="illust"><div class="illust-row"><div class="illust-lines-sm" style="flex:1;padding-top:4px"><div></div><div></div><div></div></div><div class="illust-box" style="width:30px;height:40px">&#128247;</div></div></div><span>Nội dung trái + Hình phải</span></div>
+                <div class="module-option" onclick="addModule('double_image')"><div class="illust"><div class="illust-row"><div class="illust-box" style="width:30px;height:35px">&#128247;</div><div class="illust-box" style="width:30px;height:35px">&#128247;</div></div></div><span>Hình ảnh đôi</span></div>
+                <div class="module-option" onclick="addModule('triple_image')"><div class="illust"><div class="illust-row"><div class="illust-box" style="width:22px;height:30px">&#128247;</div><div class="illust-box" style="width:22px;height:30px">&#128247;</div><div class="illust-box" style="width:22px;height:30px">&#128247;</div></div></div><span>Hình ảnh tam</span></div>
+                <div class="module-option" onclick="addModule('quad_image')"><div class="illust"><div style="display:grid;grid-template-columns:1fr 1fr;gap:3px"><div class="illust-box" style="width:22px;height:20px">&#128247;</div><div class="illust-box" style="width:22px;height:20px">&#128247;</div><div class="illust-box" style="width:22px;height:20px">&#128247;</div><div class="illust-box" style="width:22px;height:20px">&#128247;</div></div></div><span>Hình ảnh tứ</span></div>
+                <div class="module-option" onclick="addModule('link_preview')"><div class="illust"><div class="illust-link"><div></div><div></div></div></div><span>Trang khác</span></div>
+            </div>
+            <div style="text-align:center;margin-top:20px"><button type="button" class="btn btn-outline" onclick="closeAddModal()">Đóng</button></div>
+        </div>
+    </div>
+    {CREATOR_JS}
+    <script>initModules({modules_escaped!r});</script>"""
     return render_page("Sửa bài đăng", body)
 
+
 @app.route("/creator/delete/<int:post_id>", methods=["POST"])
-@admin_required
+@creator_required
 def delete_post(post_id):
-    db = get_db()
+    db = get_baidang_db()
     db.execute("DELETE FROM posts WHERE id=?", (post_id,))
     db.commit()
     flash("Đã xóa bài viết.", "success")
     return redirect(url_for("creator"))
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. BÀI ĐĂNG
+# API - Image Upload
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/upload-image", methods=["POST"])
+@login_required
+def upload_image():
+    if "image" not in request.files:
+        return jsonify({"error": "Không có file"}), 400
+    f = request.files["image"]
+    if f.filename == "":
+        return jsonify({"error": "Không có file"}), 400
+    ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": "Chỉ hỗ trợ JPG, PNG, WebP"}), 400
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    f.save(filepath)
+    rel_path = f"Hinhanh/baidang/{filename}"
+    return jsonify({"path": rel_path, "filename": filename})
+
+
+@app.route("/Hinhanh/<path:filename>")
+def serve_image(filename):
+    return send_from_directory(os.path.join(BASE_DIR, "Hinhanh"), filename)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# API - Link Preview
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/link-preview")
+@login_required
+def link_preview():
+    url = request.args.get("url", "")
+    if not url:
+        return jsonify({"title": "", "description": ""})
+    try:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0 HNPP Bot"})
+        with urlopen(req, timeout=5) as resp:
+            html = resp.read(50000).decode("utf-8", errors="ignore")
+        title = ""
+        desc = ""
+        tm = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        if tm:
+            title = tm.group(1).strip()
+        dm = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)', html, re.I)
+        if not dm:
+            dm = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']', html, re.I)
+        if dm:
+            desc = dm.group(1).strip()
+        return jsonify({"title": title, "description": desc, "url": url})
+    except Exception:
+        return jsonify({"title": url, "description": "", "url": url})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. BAI DANG
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/baidang")
 def list_posts():
-    db = get_db()
+    db = get_baidang_db()
     cat = request.args.get("cat")
     if cat:
-        posts = db.execute("SELECT * FROM posts WHERE is_published=1 AND category=? ORDER BY created_at DESC", (cat,)).fetchall()
+        posts = db.execute(
+            "SELECT * FROM posts WHERE is_published=1 AND category=? ORDER BY created_at DESC",
+            (cat,),
+        ).fetchall()
     else:
-        posts = db.execute("SELECT * FROM posts WHERE is_published=1 ORDER BY created_at DESC").fetchall()
-    categories = [r[0] for r in db.execute("SELECT DISTINCT category FROM posts WHERE is_published=1").fetchall()]
+        posts = db.execute(
+            "SELECT * FROM posts WHERE is_published=1 ORDER BY created_at DESC"
+        ).fetchall()
 
     cards = ""
     for p in posts:
-        from markupsafe import escape
-        snippet = str(escape(p["content"][:200])) + ("..." if len(p["content"]) > 200 else "")
+        raw = p["description"] or p["content"]
+        snippet = str(escape(raw[:200])) + ("..." if len(raw) > 200 else "")
         cards += f"""<div class="card">
             <h3><a href="{url_for('view_post', slug=p['slug'])}">{escape(p['title'])}</a></h3>
             <p>{snippet}</p>
@@ -678,7 +1393,7 @@ def list_posts():
     if not posts:
         cards = '<div class="page-content"><p>Chưa có bài đăng nào.</p></div>'
 
-    cat_links = "".join(f'<li><a href="?cat={c}">{c}</a></li>' for c in categories)
+    cat_links = "".join(f'<li><a href="?cat={c}">{c}</a></li>' for c in CATEGORIES)
 
     body = f"""
     <div class="banner" style="padding:32px 16px 28px">
@@ -692,7 +1407,7 @@ def list_posts():
             </div>
             <div class="sidebar">
                 <div class="widget">
-                    <h4>Chuyên mục</h4>
+                    <h4>Mục</h4>
                     <ul>{cat_links}</ul>
                 </div>
             </div>
@@ -700,34 +1415,101 @@ def list_posts():
     </main>"""
     return render_page("Bài đăng", body)
 
+
 @app.route("/baidang/<slug>")
 def view_post(slug):
-    db = get_db()
-    post = db.execute("SELECT * FROM posts WHERE slug=? AND is_published=1", (slug,)).fetchone()
+    db = get_baidang_db()
+    post = db.execute(
+        "SELECT * FROM posts WHERE slug=? AND is_published=1", (slug,)
+    ).fetchone()
     if not post:
         abort(404)
-    author = db.execute("SELECT * FROM users WHERE id=?", (post["author_id"],)).fetchone()
+    author = get_account_db().execute(
+        "SELECT * FROM users WHERE id=?", (post["author_id"],)
+    ).fetchone()
     author_name = author["display_name"] if author else "N/A"
+
+    # Render content: prefer modules, fall back to content field
+    modules_html = render_modules_html(post["content_modules"])
+    if not modules_html:
+        content_html = render_text_with_links(post["content"]) if post["content"] else ""
+    else:
+        content_html = modules_html
+
+    desc_html = ""
+    if post["description"]:
+        desc_html = f'<div class="post-desc">{escape(post["description"])}</div>'
 
     body = f"""<main>
     <div class="page-content" style="max-width:860px;margin:24px auto">
         <div class="post-header">
-            <h1>{post['title']}</h1>
+            <h1>{escape(post['title'])}</h1>
             <div class="post-meta">
                 <span class="badge badge-user">{post['category']}</span>
                 &bull; Đăng ngày {post['created_at'][:16]}
                 &bull; Tác giả: {author_name}
             </div>
         </div>
+        {desc_html}
         <hr style="border:none;border-top:2px solid var(--accent);margin:16px 0">
-        <div class="post-body">{post['content']}</div>
+        <div class="post-body">{content_html}</div>
         <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
         <a href="{{{{URL_POSTS}}}}" class="btn btn-outline">&larr; Quay lại danh sách</a>
     </div></main>"""
-    return render_page(post["title"], body)
+    return render_page(str(escape(post["title"])), body)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. TOS
+# 6. PASSWORD PAGE (Headadmins only)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/password/")
+def password_page():
+    key = request.args.get("key", "")
+    passw = request.args.get("pass", "")
+    if key != PASSWORD_PAGE_KEY or passw != PASSWORD_PAGE_PASS:
+        abort(404)
+
+    user = get_current_user()
+    if not user or user["role"] != "headadmin":
+        abort(404)
+
+    db = get_account_db()
+    users = db.execute(
+        "SELECT * FROM users WHERE role != 'headadmin' ORDER BY id"
+    ).fetchall()
+
+    rows = ""
+    for u in users:
+        try:
+            pw = decrypt_password(u["password_enc"])
+        except Exception:
+            pw = "[Không thể giải mã]"
+        badge_cls = f"badge-{u['role']}"
+        label = ROLE_LABELS.get(u["role"], u["role"])
+        rows += f"""<tr>
+            <td>{u['id']}</td>
+            <td>{escape(u['username'])}</td>
+            <td>{escape(u['display_name'])}</td>
+            <td><span class="badge {badge_cls}">{label}</span></td>
+            <td><code>{escape(pw)}</code></td>
+            <td>{u['created_at'][:16]}</td>
+        </tr>"""
+
+    body = f"""<main>
+    <div class="page-content" style="max-width:960px;margin:24px auto">
+        <h1>&#128274; Quản lý mật khẩu</h1>
+        <p style="color:#888;margin-bottom:20px">Chỉ Headadmins mới có quyền xem trang này. Không hiển thị tài khoản Headadmin.</p>
+        <div class="table-wrapper"><table>
+            <thead><tr><th>ID</th><th>Username</th><th>Tên</th><th>Quyền</th><th>Mật khẩu</th><th>Ngày tạo</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table></div>
+    </div></main>"""
+    return render_page("Quản lý mật khẩu", body)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. TOS
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/tos")
@@ -755,8 +1537,9 @@ def tos():
     </div></main>"""
     return render_page("Điều khoản sử dụng", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. CHÍNH SÁCH
+# 8. CHINH SACH
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/chinh-sach")
@@ -773,7 +1556,7 @@ def chinh_sach():
             <li>Gửi thông báo quan trọng liên quan đến hệ thống.</li>
         </ul>
         <h2>3. Bảo mật thông tin</h2>
-        <p>Chúng tôi áp dụng các biện pháp bảo mật hợp lý để bảo vệ thông tin cá nhân của bạn khỏi truy cập trái phép, sử dụng sai mục đích hoặc tiết lộ.</p>
+        <p>Chúng tôi áp dụng các biện pháp bảo mật hợp lý để bảo vệ thông tin cá nhân của bạn khỏi truy cập trái phép, sử dụng sai mục đích hoặc tiết lộ. Mật khẩu được mã hóa một chiều, không thể giải mã ngược.</p>
         <h2>4. Chia sẻ thông tin</h2>
         <p>Chúng tôi không chia sẻ thông tin cá nhân của bạn với bên thứ ba, trừ khi được yêu cầu bởi pháp luật hoặc được sự đồng ý của bạn.</p>
         <h2>5. Cookie</h2>
@@ -783,8 +1566,9 @@ def chinh_sach():
     </div></main>"""
     return render_page("Chính sách bảo mật", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 8. BẢN QUYỀN
+# 9. BAN QUYEN
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/ban-quyen")
@@ -810,8 +1594,9 @@ def ban_quyen():
     </div></main>"""
     return render_page("Bản quyền", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 9. LUẬT HNPP
+# 10. LUAT HNPP
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/luat-hnpp")
@@ -872,8 +1657,9 @@ def luat_hnpp():
     </div></main>"""
     return render_page("Luật HNPP", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 10. SUPPORT
+# 11. SUPPORT
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/support")
@@ -891,36 +1677,41 @@ def support():
         <div style="margin-top:16px">
             <details><summary>Làm thế nào để đăng nhập?</summary><p style="margin-top:8px">Bạn cần có tài khoản được tạo sẵn bởi quản trị viên. Liên hệ Admin để được cấp tài khoản.</p></details>
             <details><summary>Tôi quên mật khẩu, phải làm sao?</summary><p style="margin-top:8px">Vui lòng liên hệ quản trị viên để được đặt lại mật khẩu.</p></details>
-            <details><summary>Làm sao để đăng bài viết?</summary><p style="margin-top:8px">Chỉ tài khoản Admin trở lên mới có quyền đăng bài. Truy cập trang Tạo bài đăng để bắt đầu.</p></details>
+            <details><summary>Làm sao để đăng bài viết?</summary><p style="margin-top:8px">Tài khoản có quyền Creators trở lên mới có quyền đăng bài. Truy cập trang Tạo bài đăng để bắt đầu.</p></details>
             <details><summary>Website có hỗ trợ mobile không?</summary><p style="margin-top:8px">Có! Website được thiết kế responsive, tương thích với tất cả thiết bị di động.</p></details>
         </div>
     </div></main>"""
     return render_page("Hỗ trợ", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 11. ADMIN
+# 12. ADMIN
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/admin")
 @admin_required
 def admin_panel():
-    db = get_db()
+    db = get_baidang_db()
     pc = db.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
-    uc = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    uc = get_account_db().execute("SELECT COUNT(*) FROM users").fetchone()[0]
     pub = db.execute("SELECT COUNT(*) FROM posts WHERE is_published=1").fetchone()[0]
     draft = db.execute("SELECT COUNT(*) FROM posts WHERE is_published=0").fetchone()[0]
-    all_posts = db.execute("""
-        SELECT posts.*, users.display_name as author_name
-        FROM posts LEFT JOIN users ON posts.author_id=users.id
-        ORDER BY posts.created_at DESC""").fetchall()
+    all_posts = db.execute(
+        "SELECT * FROM posts ORDER BY created_at DESC"
+    ).fetchall()
 
     rows = ""
+    acc_db = get_account_db()
     for p in all_posts:
+        author = acc_db.execute(
+            "SELECT display_name FROM users WHERE id=?", (p["author_id"],)
+        ).fetchone()
+        author_name = author["display_name"] if author else "N/A"
         status = "Xuất bản" if p["is_published"] else "Nháp"
         rows += f"""<tr>
             <td>{p['id']}</td>
-            <td><a href="{url_for('view_post', slug=p['slug'])}">{p['title']}</a></td>
-            <td>{p['category']}</td><td>{p['author_name'] or 'N/A'}</td>
+            <td><a href="{url_for('view_post', slug=p['slug'])}">{escape(p['title'])}</a></td>
+            <td>{p['category']}</td><td>{author_name}</td>
             <td>{p['created_at'][:16]}</td><td>{status}</td></tr>"""
 
     body = f"""<main>
@@ -941,20 +1732,21 @@ def admin_panel():
         <div style="margin-top:32px">
             <div class="section-title">Tất cả bài đăng</div>
             <div class="table-wrapper"><table>
-                <thead><tr><th>ID</th><th>Tiêu đề</th><th>Chuyên mục</th><th>Tác giả</th><th>Ngày tạo</th><th>Trạng thái</th></tr></thead>
+                <thead><tr><th>ID</th><th>Tiêu đề</th><th>Mục</th><th>Tác giả</th><th>Ngày tạo</th><th>Trạng thái</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table></div>
         </div>
     </div></main>"""
     return render_page("Admin", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 12. GROUP GAME
+# 13. GROUP GAME
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/group-game")
 def group_game():
-    db = get_db()
+    db = get_baidang_db()
     game_posts = db.execute(
         "SELECT * FROM posts WHERE is_published=1 AND category='Group Game' ORDER BY created_at DESC"
     ).fetchall()
@@ -962,14 +1754,14 @@ def group_game():
     post_cards = ""
     if game_posts:
         for p in game_posts:
-            snippet = p["content"][:150] + ("..." if len(p["content"]) > 150 else "")
+            snippet = str(escape(p["content"][:150])) + ("..." if len(p["content"]) > 150 else "")
             post_cards += f"""<div class="card">
-                <h3><a href="{url_for('view_post', slug=p['slug'])}">{p['title']}</a></h3>
+                <h3><a href="{url_for('view_post', slug=p['slug'])}">{escape(p['title'])}</a></h3>
                 <p>{snippet}</p>
                 <div class="meta">{p['created_at'][:16]}</div>
             </div>"""
     else:
-        post_cards = '<p style="color:#888">Chưa có bài viết nào trong chuyên mục Group Game.</p>'
+        post_cards = '<p style="color:#888">Chưa có bài viết nào trong mục Group Game.</p>'
 
     body = f"""
     <div class="banner" style="padding:32px 16px 28px">
@@ -1003,6 +1795,7 @@ def group_game():
     </div></main>"""
     return render_page("Group Game", body)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ERROR HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1018,6 +1811,7 @@ def page_not_found(e):
     </div></main>"""
     return render_page("404", body, 404)
 
+
 @app.errorhandler(403)
 def forbidden(e):
     body = """<main>
@@ -1029,6 +1823,7 @@ def forbidden(e):
     </div></main>"""
     return render_page("403", body, 403)
 
+
 @app.errorhandler(500)
 def internal_error(e):
     body = """<main>
@@ -1039,6 +1834,7 @@ def internal_error(e):
         <a href="{{URL_HOME}}" class="btn" style="margin-top:24px">Về trang chủ</a>
     </div></main>"""
     return render_page("500", body, 500)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN
