@@ -34,3 +34,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Python
+__pycache__/
+*.pyc
+hnpp.db
+account.db
+baidang.db
+main.db
+Hinhanh/
+Logs/

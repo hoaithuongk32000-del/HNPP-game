@@ -3,21 +3,98 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #0a0a1a;
+  --foreground: #ededed;
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #12122a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #6c5ce7;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a29bfe;
+}
+
+/* Neon text glow */
+.neon-text {
+  text-shadow: 0 0 10px rgba(108, 92, 231, 0.8),
+    0 0 20px rgba(108, 92, 231, 0.6), 0 0 40px rgba(108, 92, 231, 0.4);
+}
+
+.neon-text-accent {
+  text-shadow: 0 0 10px rgba(0, 206, 201, 0.8),
+    0 0 20px rgba(0, 206, 201, 0.6), 0 0 40px rgba(0, 206, 201, 0.4);
+}
+
+/* Card hover glow */
+.card-glow {
+  transition: all 0.3s ease;
+}
+
+.card-glow:hover {
+  box-shadow: 0 0 15px rgba(108, 92, 231, 0.4),
+    0 0 30px rgba(108, 92, 231, 0.2);
+  transform: translateY(-4px);
+}
+
+/* Button styles */
+.btn-primary {
+  @apply bg-primary hover:bg-primary-light text-white font-semibold py-2 px-6 rounded-lg transition-all duration-300;
+  box-shadow: 0 0 10px rgba(108, 92, 231, 0.3);
+}
+
+.btn-primary:hover {
+  box-shadow: 0 0 20px rgba(108, 92, 231, 0.6);
+}
+
+.btn-accent {
+  @apply bg-accent hover:bg-accent-light text-dark-900 font-semibold py-2 px-6 rounded-lg transition-all duration-300;
+  box-shadow: 0 0 10px rgba(0, 206, 201, 0.3);
+}
+
+.btn-accent:hover {
+  box-shadow: 0 0 20px rgba(0, 206, 201, 0.6);
+}
+
+/* Glass effect */
+.glass {
+  background: rgba(26, 26, 62, 0.6);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(108, 92, 231, 0.2);
+}
+
+/* Gradient border */
+.gradient-border {
+  position: relative;
+}
+
+.gradient-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #6c5ce7, #00cec9);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 
 @layer utilities {
