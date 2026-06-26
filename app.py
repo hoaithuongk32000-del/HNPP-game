@@ -38,10 +38,6 @@ DB_MAIN = os.path.join(BASE_DIR, "main.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "Hinhanh", "baidang")
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 
-MOD_KEY = "PUNKX--MEUG-4KK8-Q0SJ-FHXK"
-MOD_PASS = "HNPP_AD-NO-PASS[18]ok"
-MOD_PASS_PARAM = "hhoaihuongvntr"
-
 PASSWORD_PAGE_KEY = "mu6jAG5ZxVP$72G"
 PASSWORD_PAGE_PASS = "hoaithuong"
 
@@ -222,8 +218,7 @@ def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
-            flash("Vui lòng đăng nhập.", "warning")
-            return redirect(url_for("login"))
+            return redirect(url_for("home"))
         return f(*args, **kwargs)
     return wrapper
 
@@ -232,11 +227,9 @@ def creator_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
-            flash("Vui lòng đăng nhập.", "warning")
-            return redirect(url_for("login"))
+            return redirect(url_for("home"))
         user = get_current_user()
         if not user or role_level(user) < ROLE_LEVELS["creators"]:
-            flash("Bạn không có quyền truy cập.", "danger")
             return redirect(url_for("home"))
         return f(*args, **kwargs)
     return wrapper
@@ -246,11 +239,21 @@ def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
-            flash("Vui lòng đăng nhập.", "warning")
-            return redirect(url_for("login"))
+            return redirect(url_for("home"))
         user = get_current_user()
         if not user or role_level(user) < ROLE_LEVELS["trial_admin"]:
-            flash("Bạn không có quyền truy cập.", "danger")
+            return redirect(url_for("home"))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def headadmin_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("home"))
+        user = get_current_user()
+        if not user or user["role"] != "headadmin":
             return redirect(url_for("home"))
         return f(*args, **kwargs)
     return wrapper
@@ -873,15 +876,12 @@ def logout():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. TRANG AN - MOD
+# 3. QUẢN LÝ TÀI KHOẢN (HeadAdmin only)
 # ═══════════════════════════════════════════════════════════════════════════
 
-@app.route("/mod")
-def mod_page():
-    key = request.args.get("key", "")
-    passw = request.args.get(MOD_PASS_PARAM, "")
-    if key != MOD_KEY or passw != MOD_PASS:
-        abort(404)
+@app.route("/admin/taotaikhoan")
+@headadmin_required
+def admin_taotaikhoan():
     db = get_account_db()
     users = db.execute("SELECT * FROM users ORDER BY id").fetchall()
 
@@ -897,9 +897,7 @@ def mod_page():
             <td>{u['id']}</td><td>{u['username']}</td><td>{u['display_name']}</td>
             <td><span class="badge {badge_cls}">{label}</span></td>
             <td>{u['created_at'][:16]}</td>
-            <td><form method="POST" action="{url_for('mod_delete')}" style="display:inline">
-                <input type="hidden" name="mod_key" value="{key}">
-                <input type="hidden" name="mod_pass" value="{passw}">
+            <td><form method="POST" action="{url_for('admin_taotaikhoan_delete')}" style="display:inline">
                 <input type="hidden" name="user_id" value="{u['id']}">
                 <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Xóa tài khoản này?')">Xóa</button>
             </form></td></tr>"""
@@ -907,9 +905,7 @@ def mod_page():
     body = f"""<main>
     <div class="form-container wide">
         <h2>&#128272; Quản lý tài khoản</h2>
-        <form method="POST" action="{url_for('mod_create')}">
-            <input type="hidden" name="mod_key" value="{key}">
-            <input type="hidden" name="mod_pass" value="{passw}">
+        <form method="POST" action="{url_for('admin_taotaikhoan_create')}">
             <div class="section-title" style="font-size:1rem">Tạo tài khoản mới</div>
             <div class="form-group"><label>Tên đăng nhập</label><input type="text" name="username" required placeholder="Tên đăng nhập"></div>
             <div class="form-group"><label>Tên hiển thị</label><input type="text" name="display_name" required placeholder="Tên hiển thị"></div>
@@ -929,12 +925,9 @@ def mod_page():
     return render_page("Quản lý tài khoản", body)
 
 
-@app.route("/mod/create", methods=["POST"])
-def mod_create():
-    key = request.form.get("mod_key", "")
-    passw = request.form.get("mod_pass", "")
-    if key != MOD_KEY or passw != MOD_PASS:
-        abort(404)
+@app.route("/admin/taotaikhoan/create", methods=["POST"])
+@headadmin_required
+def admin_taotaikhoan_create():
     username = request.form.get("username", "").strip()
     display_name = request.form.get("display_name", "").strip()
     password = request.form.get("password", "")
@@ -943,7 +936,7 @@ def mod_create():
         role = "creators"
     if not username or not password:
         flash("Vui lòng điền đầy đủ thông tin.", "warning")
-        return redirect(f"/mod?key={key}&{MOD_PASS_PARAM}={passw}")
+        return redirect(url_for("admin_taotaikhoan"))
     db = get_account_db()
     try:
         pw_hash = generate_password_hash(password)
@@ -956,20 +949,17 @@ def mod_create():
         flash(f"Tạo tài khoản '{username}' thành công!", "success")
     except sqlite3.IntegrityError:
         flash(f"Tên đăng nhập '{username}' đã tồn tại.", "danger")
-    return redirect(f"/mod?key={key}&{MOD_PASS_PARAM}={passw}")
+    return redirect(url_for("admin_taotaikhoan"))
 
 
-@app.route("/mod/delete", methods=["POST"])
-def mod_delete():
-    key = request.form.get("mod_key", "")
-    passw = request.form.get("mod_pass", "")
-    if key != MOD_KEY or passw != MOD_PASS:
-        abort(404)
+@app.route("/admin/taotaikhoan/delete", methods=["POST"])
+@headadmin_required
+def admin_taotaikhoan_delete():
     db = get_account_db()
     db.execute("DELETE FROM users WHERE id=?", (request.form.get("user_id"),))
     db.commit()
     flash("Đã xóa tài khoản.", "success")
-    return redirect(f"/mod?key={key}&{MOD_PASS_PARAM}={passw}")
+    return redirect(url_for("admin_taotaikhoan"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1763,15 +1753,12 @@ def view_post(slug):
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route("/password/")
+@headadmin_required
 def password_page():
     key = request.args.get("key", "")
     passw = request.args.get("pass", "")
     if key != PASSWORD_PAGE_KEY or passw != PASSWORD_PAGE_PASS:
-        abort(404)
-
-    user = get_current_user()
-    if not user or user["role"] != "headadmin":
-        abort(404)
+        return redirect(url_for("home"))
 
     db = get_account_db()
     users = db.execute(
