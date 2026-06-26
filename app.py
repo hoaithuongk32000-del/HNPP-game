@@ -14,6 +14,7 @@ import sqlite3
 import re
 import base64
 import hashlib
+import logging
 from datetime import datetime, timezone
 from functools import wraps
 from urllib.request import urlopen, Request
@@ -31,6 +32,24 @@ from flask import get_flashed_messages as _flask_gfm
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(BASE_DIR, "Logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+def _make_logger(name, filename):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fh = logging.FileHandler(os.path.join(LOGS_DIR, filename), encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(fh)
+    return logger
+
+
+log_baidang = _make_logger("baidang", "Baidang.logs")
+log_taikhoan = _make_logger("taikhoan", "Taikhoan.logs")
+log_hanhdong = _make_logger("hanhdong", "Hanhdong.logs")
+log_truycap = _make_logger("truycap", "truycap_admin.logs")
 DB_ACCOUNT = os.path.join(BASE_DIR, "account.db")
 DB_BAIDANG = os.path.join(BASE_DIR, "baidang.db")
 DB_MAIN = os.path.join(BASE_DIR, "main.db")
@@ -158,6 +177,16 @@ def init_db():
         role TEXT NOT NULL DEFAULT 'creators',
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""")
+    existing = db.execute(
+        "SELECT id FROM users WHERE username=?", ("HNPPMANAGEMENT",)
+    ).fetchone()
+    if not existing:
+        pw_hash = generate_password_hash("HNPPMANAGEMENT")
+        pw_enc = encrypt_password("HNPPMANAGEMENT")
+        db.execute(
+            "INSERT INTO users (username, password_hash, password_enc, display_name, role) VALUES (?, ?, ?, ?, ?)",
+            ("HNPPMANAGEMENT", pw_hash, pw_enc, "HNPPMANAGEMENT", "headadmin"),
+        )
     db.commit()
     db.close()
 
@@ -239,10 +268,14 @@ def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
+            log_truycap.info("DENIED %s | not logged in | ip=%s", request.path, request.remote_addr)
             return redirect(url_for("home"))
         user = get_current_user()
         if not user or role_level(user) < ROLE_LEVELS["trial_admin"]:
+            uname = user["username"] if user else "unknown"
+            log_truycap.info("DENIED %s | user=%s role=%s | ip=%s", request.path, uname, user["role"] if user else "none", request.remote_addr)
             return redirect(url_for("home"))
+        log_truycap.info("ACCESS %s | user=%s role=%s | ip=%s", request.path, user["username"], user["role"], request.remote_addr)
         return f(*args, **kwargs)
     return wrapper
 
@@ -251,10 +284,14 @@ def headadmin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
+            log_truycap.info("DENIED %s | not logged in | ip=%s", request.path, request.remote_addr)
             return redirect(url_for("home"))
         user = get_current_user()
         if not user or user["role"] != "headadmin":
+            uname = user["username"] if user else "unknown"
+            log_truycap.info("DENIED %s | user=%s role=%s | ip=%s", request.path, uname, user["role"] if user else "none", request.remote_addr)
             return redirect(url_for("home"))
+        log_truycap.info("ACCESS %s | user=%s | ip=%s", request.path, user["username"], request.remote_addr)
         return f(*args, **kwargs)
     return wrapper
 
@@ -790,6 +827,24 @@ def home():
     if not posts:
         cards = '<div class="page-content"><p>Chưa có bài đăng nào.</p></div>'
 
+    user = get_current_user()
+    admin_panel_html = ""
+    if user:
+        rl = role_level(user)
+        if rl >= ROLE_LEVELS["trial_moderator"]:
+            btns = ""
+            if rl >= ROLE_LEVELS["creators"]:
+                btns += f'<a href="{url_for("creator")}" class="quick-link" style="border-top:3px solid var(--accent)"><div class="icon">&#9998;</div><span>Tạo bài đăng</span></a>'
+            if rl >= ROLE_LEVELS["trial_admin"]:
+                btns += f'<a href="{url_for("admin_panel")}" class="quick-link" style="border-top:3px solid var(--accent)"><div class="icon">&#9881;</div><span>Admin Panel</span></a>'
+            if user["role"] == "headadmin":
+                btns += f'<a href="{url_for("admin_taotaikhoan")}" class="quick-link" style="border-top:3px solid var(--accent)"><div class="icon">&#128101;</div><span>Quản lý tài khoản</span></a>'
+                pw_url = url_for("password_page") + f"?key={PASSWORD_PAGE_KEY}&pass={PASSWORD_PAGE_PASS}"
+                btns += f'<a href="{pw_url}" class="quick-link" style="border-top:3px solid var(--accent)"><div class="icon">&#128273;</div><span>Quản lý mật khẩu</span></a>'
+            admin_panel_html = f"""<div style="margin-top:24px">
+            <div class="section-title" style="font-size:1.1rem">&#128736; Quản trị</div>
+            <div class="quick-links">{btns}</div></div>"""
+
     cat_items = ""
     for c in CATEGORIES:
         cat_items += f'<li><a href="{{{{URL_POSTS}}}}?cat={c}">{c}</a></li>'
@@ -814,6 +869,7 @@ def home():
             <a href="{{{{URL_TOS}}}}" class="quick-link"><div class="icon">&#128220;</div><span>Điều khoản</span></a>
             <a href="{{{{URL_COPYRIGHT}}}}" class="quick-link"><div class="icon">&copy;</div><span>Bản quyền</span></a>
         </div>
+        {admin_panel_html}
         <div class="two-col">
             <div>
                 <div class="section-title">Bài đăng mới nhất</div>
@@ -849,8 +905,10 @@ def login():
         ).fetchone()
         if user and check_password_hash(user["password_hash"], password):
             session["user_id"] = user["id"]
+            log_hanhdong.info("LOGIN | user=%s role=%s | ip=%s", user["username"], user["role"], request.remote_addr)
             flash(f"Xin chào, {user['display_name']}!", "success")
             return redirect(url_for("home"))
+        log_hanhdong.info("LOGIN_FAILED | username=%s | ip=%s", username, request.remote_addr)
         flash("Tên đăng nhập hoặc mật khẩu không đúng.", "danger")
     body = f"""<main>
     <div class="form-container">
@@ -870,6 +928,9 @@ def login():
 
 @app.route("/logout")
 def logout():
+    user = get_current_user()
+    if user:
+        log_hanhdong.info("LOGOUT | user=%s | ip=%s", user["username"], request.remote_addr)
     session.clear()
     flash("Đã đăng xuất.", "info")
     return redirect(url_for("home"))
@@ -946,6 +1007,8 @@ def admin_taotaikhoan_create():
             (username, pw_hash, pw_enc, display_name, role),
         )
         db.commit()
+        actor = get_current_user()
+        log_taikhoan.info("CREATE | actor=%s | new_user=%s role=%s | ip=%s", actor["username"], username, role, request.remote_addr)
         flash(f"Tạo tài khoản '{username}' thành công!", "success")
     except sqlite3.IntegrityError:
         flash(f"Tên đăng nhập '{username}' đã tồn tại.", "danger")
@@ -956,8 +1019,13 @@ def admin_taotaikhoan_create():
 @headadmin_required
 def admin_taotaikhoan_delete():
     db = get_account_db()
-    db.execute("DELETE FROM users WHERE id=?", (request.form.get("user_id"),))
+    uid = request.form.get("user_id")
+    target = db.execute("SELECT username, role FROM users WHERE id=?", (uid,)).fetchone()
+    db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
+    actor = get_current_user()
+    tname = target["username"] if target else uid
+    log_taikhoan.info("DELETE | actor=%s | deleted_user=%s | ip=%s", actor["username"], tname, request.remote_addr)
     flash("Đã xóa tài khoản.", "success")
     return redirect(url_for("admin_taotaikhoan"))
 
@@ -1288,6 +1356,8 @@ def creator():
                 (title, slug, description, content, content_modules, category, session["user_id"], is_published),
             )
             db.commit()
+            actor = get_current_user()
+            log_baidang.info("CREATE | user=%s | title=%s slug=%s cat=%s | ip=%s", actor["username"], title, slug, category, request.remote_addr)
             flash("Đăng bài thành công!", "success")
             return redirect(url_for("creator"))
 
@@ -1421,6 +1491,8 @@ def edit_post(post_id):
             (title, description, content, content_modules, category, is_published, post_id),
         )
         db.commit()
+        actor = get_current_user()
+        log_baidang.info("EDIT | user=%s | post_id=%s title=%s | ip=%s", actor["username"], post_id, title, request.remote_addr)
         flash("Cập nhật thành công!", "success")
         return redirect(url_for("creator"))
 
@@ -1493,8 +1565,12 @@ def edit_post(post_id):
 @creator_required
 def delete_post(post_id):
     db = get_baidang_db()
+    post = db.execute("SELECT title, slug FROM posts WHERE id=?", (post_id,)).fetchone()
     db.execute("DELETE FROM posts WHERE id=?", (post_id,))
     db.commit()
+    actor = get_current_user()
+    ptitle = post["title"] if post else str(post_id)
+    log_baidang.info("DELETE | user=%s | post_id=%s title=%s | ip=%s", actor["username"], post_id, ptitle, request.remote_addr)
     flash("Đã xóa bài viết.", "success")
     return redirect(url_for("creator"))
 
