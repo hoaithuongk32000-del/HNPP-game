@@ -2,7 +2,7 @@
 
 ## 1. Giới thiệu
 
-Chào mừng bạn đến với Cổng thông tin **HNPP - Hanoi Academy People's Police**. Bằng việc truy cập và sử dụng website này, bạn đồng ý tuân thủ các điều khoản và điều kiện sau đây.
+Chào mừng bạn đến với Cổng thông tin **HNPP - Hanoi Capital People's Police**. Bằng việc truy cập và sử dụng website này, bạn đồng ý tuân thủ các điều khoản và điều kiện sau đây.
 
 ## 2. Quyền và nghĩa vụ của người dùng
 

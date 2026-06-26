@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HNPP - Hanoi Academy People's Police Website
+HNPP - Hanoi Capital People's Police Website
 All-in-one single Python file (Flask + SQLite)
 Responsive for PC and Mobile
 Features: Content builder, Image upload, Markdown links, Multi-DB, Role hierarchy, Password encryption
@@ -708,7 +708,7 @@ nav a{padding:12px 24px;border-radius:0}
         <img src="{{LOGO_URL}}" alt="HNPP" class="logo-img">
         <div>
             <div class="logo-text">HNPP</div>
-            <div class="logo-sub">Hanoi Academy People's Police</div>
+            <div class="logo-sub">Hanoi Capital People's Police</div>
         </div>
     </a>
     <button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">
@@ -730,7 +730,7 @@ nav a{padding:12px 24px;border-radius:0}
 <div class="footer-inner">
     <div class="footer-col">
         <h4>HNPP</h4>
-        <p style="font-size:.85rem">Hanoi Academy People's Police<br>Cổng thông tin chính thức</p>
+        <p style="font-size:.85rem">Hanoi Capital People's Police<br>Cổng thông tin chính thức</p>
     </div>
     <div class="footer-col">
         <h4>Liên kết</h4>
@@ -751,7 +751,7 @@ nav a{padding:12px 24px;border-radius:0}
         <a href="{{URL_ADMIN}}">Quản trị</a>
     </div>
 </div>
-<div class="footer-bottom">&copy; {{YEAR}} HNPP - Hanoi Academy People's Police. All rights reserved.</div>
+<div class="footer-bottom">&copy; {{YEAR}} HNPP - Hanoi Capital People's Police. All rights reserved.</div>
 </footer>
 <script>
 document.querySelectorAll('nav a').forEach(function(a){
@@ -794,7 +794,7 @@ def home():
     body = f"""
     <div class="banner">
         <h1>Cổng Thông Tin HNPP</h1>
-        <p>Hanoi Academy People's Police &mdash; Hệ thống thông tin pháp luật và quản lý nội bộ</p>
+        <p>Hanoi Capital People's Police &mdash; Hệ thống thông tin pháp luật và quản lý nội bộ</p>
     </div>
     <main>
         <div class="stats-bar">
@@ -1846,7 +1846,7 @@ def ban_quyen():
     <div class="page-content" style="max-width:860px;margin:24px auto">
         <h1>Bản quyền</h1>
         <h2>Quyền sở hữu</h2>
-        <p>Tất cả nội dung, hình ảnh, thiết kế, mã nguồn và tài liệu trên website HNPP đều thuộc quyền sở hữu trí tuệ của <strong>Hanoi Academy People's Police (HNPP)</strong>.</p>
+        <p>Tất cả nội dung, hình ảnh, thiết kế, mã nguồn và tài liệu trên website HNPP đều thuộc quyền sở hữu trí tuệ của <strong>Hanoi Capital People's Police (HNPP)</strong>.</p>
         <h2>Quy định sử dụng</h2>
         <ul>
             <li>Nghiêm cấm sao chép, tái sử dụng hoặc phân phối nội dung mà không có sự cho phép bằng văn bản.</li>
@@ -1856,7 +1856,7 @@ def ban_quyen():
         <h2>Báo cáo vi phạm</h2>
         <p>Nếu bạn phát hiện nội dung vi phạm bản quyền, vui lòng liên hệ qua trang <a href="{{{{URL_SUPPORT}}}}">Hỗ trợ</a> để chúng tôi xử lý kịp thời.</p>
         <div style="background:#fff8e1;padding:20px;border-radius:8px;border-left:4px solid var(--accent);margin-top:24px">
-            <strong>&copy; {year} HNPP - Hanoi Academy People's Police.</strong><br>
+            <strong>&copy; {year} HNPP - Hanoi Capital People's Police.</strong><br>
             Mọi quyền được bảo lưu theo quy định pháp luật Việt Nam.
         </div>
     </div></main>"""
@@ -1872,7 +1872,7 @@ def luat_hnpp():
     body = """
     <div class="banner" style="padding:32px 16px 28px">
         <h1>&#9878; Luật HNPP</h1>
-        <p>Các quy định và luật lệ chính thức của Hanoi Academy People's Police</p>
+        <p>Các quy định và luật lệ chính thức của Hanoi Capital People's Police</p>
     </div>
     <main>
     <div class="page-content" style="max-width:860px;margin:24px auto">
