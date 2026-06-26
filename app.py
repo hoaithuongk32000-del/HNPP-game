@@ -730,7 +730,7 @@ nav a{padding:12px 24px;border-radius:0}
 <div class="footer-inner">
     <div class="footer-col">
         <h4>HNPP</h4>
-        <p style="font-size:.85rem">Hanoi Capital People's Police<br>Cổng thông tin chính thức</p>
+        <p style="font-size:.85rem">Hanoi Capital People's Police<br>Cổng Thông Tin Bộ Công An HNPP</p>
     </div>
     <div class="footer-col">
         <h4>Liên kết</h4>
@@ -793,7 +793,7 @@ def home():
 
     body = f"""
     <div class="banner">
-        <h1>Cổng Thông Tin HNPP</h1>
+        <h1>Cổng Thông Tin Bộ Công An HNPP</h1>
         <p>Hanoi Capital People's Police &mdash; Hệ thống thông tin pháp luật và quản lý nội bộ</p>
     </div>
     <main>
@@ -823,7 +823,7 @@ def home():
                 </div>
                 <div class="widget">
                     <h4>Thông báo</h4>
-                    <p style="font-size:.88rem;color:#555">Chào mừng bạn đến với cổng thông tin HNPP. Vui lòng tuân thủ các quy định và luật lệ của hệ thống.</p>
+                    <p style="font-size:.88rem;color:#555">Chào mừng bạn đến với Cổng Thông Tin Bộ Công An HNPP. Vui lòng tuân thủ các quy định và luật lệ của hệ thống.</p>
                 </div>
             </div>
         </div>
